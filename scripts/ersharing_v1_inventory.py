@@ -1,7 +1,7 @@
-"""Read-only inventory of v1 ER2ER configs. Prints aggregates only (no tokens, no endpoints).
+"""Read-only inventory of v1 EarthRanger Sharing configs. Prints aggregates only (no tokens, no endpoints).
 
 Run inside a portal pod:
-    python3 manage.py shell < er2er_v1_inventory.py
+    python3 manage.py shell < ersharing_v1_inventory.py
 """
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone

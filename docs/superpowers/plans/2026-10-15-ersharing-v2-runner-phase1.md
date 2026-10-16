@@ -1,11 +1,11 @@
-# ER2ER Sharing Runner (Phase 1) Implementation Plan
+# EarthRanger Sharing Runner (Phase 1) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the `earthranger_sharing` action runner that mirrors events and subject tracks from one EarthRanger site to every EarthRanger destination of a Gundi v2 connection. It replaces the two legacy v1 ER2ER jobs.
+**Goal:** Build the `earthranger_sharing` action runner that mirrors events and subject tracks from one EarthRanger site to every EarthRanger destination of a Gundi v2 connection. It replaces the two legacy v1 sharing jobs.
 
 **Architecture:**
-- **Thin action handlers.** `app/actions/handlers.py` contains only thin handlers; the work lives in focused modules under `app/er2er/`.
+- **Thin action handlers.** `app/actions/handlers.py` contains only thin handlers; the work lives in focused modules under `app/ersharing/`.
 - **Direct writes.** Each run resolves the connection's destinations and their stored ER credentials through `gundi-client`, then writes to each destination ER directly with `erclient`.
 - **Per-destination progress.** Progress is kept per destination in Redis through the template's `IntegrationStateManager`. Markers advance only past work the destination accepted.
 
@@ -16,15 +16,16 @@
 - shapely 2, python-dateutil
 - pytest 7, pytest-asyncio 0.21 (strict mode: every async test needs `@pytest.mark.asyncio`), pytest-mock
 
-**Spec:** `docs/superpowers/specs/2026-10-15-er2er-v2-sharing-design.md`. Read §4–§11 before starting.
+**Spec:** `docs/superpowers/specs/2026-10-15-ersharing-v2-design.md`. Read §4–§11 before starting.
 
-**Out of scope for this plan:** the cdip `migrate_er2er_v1` command (spec §10). It gets its own plan once the prod inventory (`scripts/er2er_v1_inventory.py`) has been run. Phases 2–4 are also out of scope.
+**Out of scope for this plan:** the cdip `migrate_ersharing_v1` command (spec §10). It gets its own plan once the prod inventory (`scripts/ersharing_v1_inventory.py`) has been run. Phases 2–4 are also out of scope.
 
 ## Global Constraints
 
 - **Integration type slug:** `earthranger_sharing`. Destinations are integrations whose type value is `earth_ranger`.
 - **Action ids:** `auth`, `list_event_types`, `list_subject_groups`, `list_feature_groups`, `sync_events`, `sync_observations`. Both sync actions run on `*/5 * * * *`.
 - **v2 event types only.** No v1 event-type code paths (spec D7).
+- **Naming:** the product is "EarthRanger Sharing" and code uses `ersharing`. The only exceptions are the stored legacy names `er2er_src_id`, `er2er_src_system`, `er2er_src_serial_number`, `er2er_src_service_root` and `section-er2er-hidden`, which stay exactly as written (spec D8). They live only in `PROVENANCE_FIELDS` and `PROVENANCE_SECTION_ID` in `app/ersharing/event_types.py`.
 - **Event copies keep the source event UUID** and carry these in `event_details`: `er2er_src_id`, `er2er_src_serial_number`, `er2er_src_system`, `er2er_src_service_root`.
 - **Prefixing:**
   - Values use `{value}_{original}`. Event types are lower-cased.
@@ -40,7 +41,7 @@
 - **Batching and file limits:** observation batches of at most 200; attachments over 20 MB are skipped with a warning.
 - **Time budget:** `0.8 × settings.MAX_ACTION_EXECUTION_TIME`. When it runs out, save progress, release the lease, then `trigger_action` the same action.
 - **Leases:** each sync action holds a Redis lease (`set_if_absent`, TTL = `MAX_ACTION_EXECUTION_TIME + 30`). A run that finds the lease taken returns `{"status": "skipped", ...}`.
-- **Import rule:** `app/actions/__init__.py` imports `app.actions.handlers` at import time. **`handlers.py` must import `app.er2er.*` inside function bodies, never at module top**, or importing any `app.er2er` module first creates a circular import.
+- **Import rule:** `app/actions/__init__.py` imports `app.actions.handlers` at import time. **`handlers.py` must import `app.ersharing.*` inside function bodies, never at module top**, or importing any `app.ersharing` module first creates a circular import.
 - **Errors:** every ER failure leaves `ERSite` as an `IntegrationError` subclass, with:
   - `message` prefixed `"Source site <host>: "` or `"Destination site <host>: "`;
   - an attribute `site_role` of `"source"` or `"destination"`.
@@ -67,24 +68,24 @@
 |---|---|
 | `requirements.in` | Add `earthranger-client`, `shapely`, `python-dateutil` |
 | `app/actions/configurations.py` | Auth, reference-query and sync config models; the portal form |
-| `app/actions/handlers.py` | Thin action handlers (lazy imports of `app.er2er`) |
-| `app/er2er/__init__.py` | Package marker |
-| `app/er2er/timeutil.py` | `parse_dt`, `utcnow` |
-| `app/er2er/naming.py` | Site host/root, same-site check, source-system derivation |
-| `app/er2er/modes.py` | Effective settings from simple defaults + compatibility overrides |
-| `app/er2er/clients.py` | `build_er_client`, `as_integration_error`, `halts_site`, `ERSite`, `open_site`, `auth_config_of` |
-| `app/er2er/destinations.py` | Resolve a connection's ER destinations and credentials |
-| `app/er2er/state.py` | `Marker`, `EventRecord`, `ShareState` over `IntegrationStateManager` |
-| `app/er2er/reporting.py` | Per-destination run report, grouped errors, stall check, activity-log publishing |
-| `app/er2er/geo.py` | Area filters from ER feature groups |
-| `app/er2er/event_types.py` | Destination category/event-type naming and sync |
-| `app/er2er/events.py` | Event cleaning, provenance, filters, echo guard |
-| `app/er2er/notes_files.py` | Note/file/incident diffing, adoption of v1 copies, applying changes |
-| `app/er2er/sync_events.py` | `sync_events` orchestration incl. daily reconcile |
-| `app/er2er/observations.py` | Observation filters, payloads, lineage, markers (pure) |
-| `app/er2er/sync_observations.py` | `sync_observations` orchestration |
-| `app/er2er/tests/fakes.py` | In-memory `FakeSite`, `InMemoryStateManager`, event/observation builders |
-| `app/er2er/tests/test_*.py` | One test module per `app/er2er` module |
+| `app/actions/handlers.py` | Thin action handlers (lazy imports of `app.ersharing`) |
+| `app/ersharing/__init__.py` | Package marker |
+| `app/ersharing/timeutil.py` | `parse_dt`, `utcnow` |
+| `app/ersharing/naming.py` | Site host/root, same-site check, source-system derivation |
+| `app/ersharing/modes.py` | Effective settings from simple defaults + compatibility overrides |
+| `app/ersharing/clients.py` | `build_er_client`, `as_integration_error`, `halts_site`, `ERSite`, `open_site`, `auth_config_of` |
+| `app/ersharing/destinations.py` | Resolve a connection's ER destinations and credentials |
+| `app/ersharing/state.py` | `Marker`, `EventRecord`, `ShareState` over `IntegrationStateManager` |
+| `app/ersharing/reporting.py` | Per-destination run report, grouped errors, stall check, activity-log publishing |
+| `app/ersharing/geo.py` | Area filters from ER feature groups |
+| `app/ersharing/event_types.py` | Destination category/event-type naming and sync |
+| `app/ersharing/events.py` | Event cleaning, provenance, filters, echo guard |
+| `app/ersharing/notes_files.py` | Note/file/incident diffing, adoption of v1 copies, applying changes |
+| `app/ersharing/sync_events.py` | `sync_events` orchestration incl. daily reconcile |
+| `app/ersharing/observations.py` | Observation filters, payloads, lineage, markers (pure) |
+| `app/ersharing/sync_observations.py` | `sync_observations` orchestration |
+| `app/ersharing/tests/fakes.py` | In-memory `FakeSite`, `InMemoryStateManager`, event/observation builders |
+| `app/ersharing/tests/test_*.py` | One test module per `app/ersharing` module |
 | `app/actions/tests/test_handlers.py` | Handler wiring, auth and reference actions |
 
 ---
@@ -93,9 +94,9 @@
 
 **Files:**
 - Modify: `requirements.in`
-- Create: `app/er2er/__init__.py`, `app/er2er/tests/__init__.py`, `app/er2er/timeutil.py`, `app/er2er/naming.py`, `app/er2er/modes.py`
+- Create: `app/ersharing/__init__.py`, `app/ersharing/tests/__init__.py`, `app/ersharing/timeutil.py`, `app/ersharing/naming.py`, `app/ersharing/modes.py`
 - Modify: `app/actions/configurations.py` (currently empty)
-- Test: `app/er2er/tests/test_modes.py`
+- Test: `app/ersharing/tests/test_modes.py`
 
 **Interfaces:**
 - Produces:
@@ -118,7 +119,7 @@ python-dateutil~=2.9
 Then run:
 
 ```bash
-mkdir -p app/er2er/tests && touch app/er2er/__init__.py app/er2er/tests/__init__.py
+mkdir -p app/ersharing/tests && touch app/ersharing/__init__.py app/ersharing/tests/__init__.py
 pip-compile --output-file=requirements.txt requirements-base.in requirements-dev.in requirements.in
 pip install -r requirements.txt
 ```
@@ -127,7 +128,7 @@ Expected: `requirements.txt` now pins `earthranger-client==1.15.x`, `shapely==2.
 
 - [ ] **Step 2: Write the failing tests**
 
-`app/er2er/tests/test_modes.py`:
+`app/ersharing/tests/test_modes.py`:
 
 ```python
 from datetime import datetime, timezone
@@ -135,9 +136,9 @@ from datetime import datetime, timezone
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncEventsConfig, SyncObservationsConfig
-from app.er2er.modes import compatibility_overrides, event_settings, observation_settings
-from app.er2er.naming import SourceSystem, derive_source_system, same_site, site_host, site_root
-from app.er2er.timeutil import parse_dt
+from app.ersharing.modes import compatibility_overrides, event_settings, observation_settings
+from app.ersharing.naming import SourceSystem, derive_source_system, same_site, site_host, site_root
+from app.ersharing.timeutil import parse_dt
 
 SOURCE = "https://sitea.pamdas.org"
 
@@ -232,12 +233,12 @@ def test_destination_auth_config_parses():
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_modes.py -v`
-Expected: collection error, `ModuleNotFoundError: No module named 'app.er2er.modes'` (or `ImportError` on `AuthenticateConfig`).
+Run: `pytest app/ersharing/tests/test_modes.py -v`
+Expected: collection error, `ModuleNotFoundError: No module named 'app.ersharing.modes'` (or `ImportError` on `AuthenticateConfig`).
 
 - [ ] **Step 4: Implement**
 
-`app/er2er/timeutil.py`:
+`app/ersharing/timeutil.py`:
 
 ```python
 from datetime import datetime, timezone
@@ -258,7 +259,7 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 ```
 
-`app/er2er/naming.py`:
+`app/ersharing/naming.py`:
 
 ```python
 """Site identity and source-system naming (pure)."""
@@ -446,7 +447,7 @@ class ListFeatureGroupsQuery(ReferenceActionConfiguration):
     """The source site's spatial feature groups."""
 ```
 
-`app/er2er/modes.py`:
+`app/ersharing/modes.py`:
 
 ```python
 """Effective share settings: simple-mode defaults plus v1 compatibility overrides (spec §6)."""
@@ -544,14 +545,14 @@ def compatibility_overrides(config: Union[SyncEventsConfig, SyncObservationsConf
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_modes.py -v`
+Run: `pytest app/ersharing/tests/test_modes.py -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add requirements.in requirements.txt app/er2er app/actions/configurations.py
-git commit -m "feat: add ER2ER config models, naming and mode resolution"
+git add requirements.in requirements.txt app/ersharing app/actions/configurations.py
+git commit -m "feat: add EarthRanger Sharing config models, naming and mode resolution"
 ```
 
 ---
@@ -559,8 +560,8 @@ git commit -m "feat: add ER2ER config models, naming and mode resolution"
 ### Task 2: ER site access and error translation
 
 **Files:**
-- Create: `app/er2er/clients.py`, `app/er2er/tests/fakes.py`
-- Test: `app/er2er/tests/test_clients.py`
+- Create: `app/ersharing/clients.py`, `app/ersharing/tests/fakes.py`
+- Test: `app/ersharing/tests/test_clients.py`
 
 **Interfaces:**
 - Consumes: `AuthenticateConfig`, `site_root`, `site_host` (Task 1)
@@ -585,11 +586,11 @@ git commit -m "feat: add ER2ER config models, naming and mode resolution"
     - `get_observations(subject_id, start: datetime) -> List[dict]`
     - feature groups: `list_feature_groups() -> List[dict]`, `get_feature_group(feature_group_id) -> dict`
     - `post_sharing_status(provider_key, payloads: List[dict])`
-  - `app/er2er/tests/fakes.py`: `FakeSite` (the same interface, in memory), `InMemoryStateManager`, `make_event(...)`, `make_observation(...)`
+  - `app/ersharing/tests/fakes.py`: `FakeSite` (the same interface, in memory), `InMemoryStateManager`, `make_event(...)`, `make_observation(...)`
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_clients.py`:
+`app/ersharing/tests/test_clients.py`:
 
 ```python
 import json
@@ -601,7 +602,7 @@ import pytest
 from erclient.er_errors import ERClientBadCredentials, ERClientBadRequest, ERClientException, ERClientNotFound
 
 from app.actions.configurations import AuthenticateConfig
-from app.er2er.clients import ERSite, auth_config_of, build_er_client, halts_site, open_site
+from app.ersharing.clients import ERSite, auth_config_of, build_er_client, halts_site, open_site
 from app.services.errors import (
     IntegrationAuthError,
     IntegrationBadResponseError,
@@ -716,10 +717,10 @@ def test_auth_config_of_reads_the_auth_action_config():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_clients.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.clients'`.
+Run: `pytest app/ersharing/tests/test_clients.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.clients'`.
 
-- [ ] **Step 3: Implement `app/er2er/clients.py`**
+- [ ] **Step 3: Implement `app/ersharing/clients.py`**
 
 The error translation is copied from `gundi-integration-earthranger` (`app/actions/handlers.py:1461-1552` at `fa5d748`), so both connectors classify ER failures the same way.
 
@@ -1023,7 +1024,7 @@ def open_site(url: str, auth: AuthenticateConfig, role: str) -> ERSite:
         raise err from e
 ```
 
-- [ ] **Step 4: Implement `app/er2er/tests/fakes.py`**
+- [ ] **Step 4: Implement `app/ersharing/tests/fakes.py`**
 
 Later tasks use this fake as their only ER test double. It mirrors `ERSite`'s interface.
 
@@ -1035,8 +1036,8 @@ import json
 import uuid
 from typing import Callable, Dict, List, Optional, Union
 
-from app.er2er.naming import site_host, site_root
-from app.er2er.timeutil import parse_dt
+from app.ersharing.naming import site_host, site_root
+from app.ersharing.timeutil import parse_dt
 from app.services.errors import IntegrationBadResponseError, IntegrationError
 
 Failure = Union[Exception, Callable[..., Optional[Exception]]]
@@ -1296,13 +1297,13 @@ class InMemoryStateManager:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_clients.py -v`
+Run: `pytest app/ersharing/tests/test_clients.py -v`
 Expected: all PASS. If `test_build_er_client_targets_site_api_root` fails on the attribute name, inspect `AsyncERClient.__init__` in the installed `erclient/client.py` and assert on the attribute it actually stores for `service_root`. Don't change the production code.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/er2er/clients.py app/er2er/tests/fakes.py app/er2er/tests/test_clients.py
+git add app/ersharing/clients.py app/ersharing/tests/fakes.py app/ersharing/tests/test_clients.py
 git commit -m "feat: add labelled ER site access with classified errors"
 ```
 
@@ -1311,8 +1312,8 @@ git commit -m "feat: add labelled ER site access with classified errors"
 ### Task 3: Destination resolution
 
 **Files:**
-- Create: `app/er2er/destinations.py`
-- Test: `app/er2er/tests/test_destinations.py`
+- Create: `app/ersharing/destinations.py`
+- Test: `app/ersharing/tests/test_destinations.py`
 
 **Interfaces:**
 - Consumes: `AuthenticateConfig` (Task 1), `same_site` (Task 1)
@@ -1324,14 +1325,14 @@ git commit -m "feat: add labelled ER site access with classified errors"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_destinations.py`:
+`app/ersharing/tests/test_destinations.py`:
 
 ```python
 from types import SimpleNamespace
 
 import pytest
 
-from app.er2er.destinations import resolve_destinations
+from app.ersharing.destinations import resolve_destinations
 
 SOURCE = "https://sitea.pamdas.org"
 
@@ -1398,10 +1399,10 @@ async def test_skips_unusable_destinations_with_reasons():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_destinations.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.destinations'`.
+Run: `pytest app/ersharing/tests/test_destinations.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.destinations'`.
 
-- [ ] **Step 3: Implement `app/er2er/destinations.py`**
+- [ ] **Step 3: Implement `app/ersharing/destinations.py`**
 
 ```python
 """The connection's EarthRanger destinations and their stored credentials (spec §5)."""
@@ -1476,7 +1477,7 @@ async def resolve_destinations(connection_id: str, source_url: str, gundi=None
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_destinations.py -v`
+Run: `pytest app/ersharing/tests/test_destinations.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Verify service-account access (spec §14 risk)**
@@ -1497,7 +1498,7 @@ Expected: the list includes `auth`. If you get 403 or `auth` is missing, stop an
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/er2er/destinations.py app/er2er/tests/test_destinations.py
+git add app/ersharing/destinations.py app/ersharing/tests/test_destinations.py
 git commit -m "feat: resolve a connection's EarthRanger destinations"
 ```
 
@@ -1506,8 +1507,8 @@ git commit -m "feat: resolve a connection's EarthRanger destinations"
 ### Task 4: Share state and run reporting
 
 **Files:**
-- Create: `app/er2er/state.py`, `app/er2er/reporting.py`
-- Test: `app/er2er/tests/test_state_and_reporting.py`
+- Create: `app/ersharing/state.py`, `app/ersharing/reporting.py`
+- Test: `app/ersharing/tests/test_state_and_reporting.py`
 
 **Interfaces:**
 - Consumes: `InMemoryStateManager` (Task 2 fakes), `IntegrationStateManager`, `log_action_activity`
@@ -1532,7 +1533,7 @@ git commit -m "feat: resolve a connection's EarthRanger destinations"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_state_and_reporting.py`:
+`app/ersharing/tests/test_state_and_reporting.py`:
 
 ```python
 from datetime import datetime, timedelta, timezone
@@ -1541,10 +1542,10 @@ from unittest.mock import AsyncMock
 import pytest
 from gundi_core.events import LogLevel
 
-from app.er2er import reporting
-from app.er2er.reporting import DestinationReport, is_stalled, publish_report
-from app.er2er.state import EVENTS_ACTION, EventRecord, Marker, NoteRecord, ShareState
-from app.er2er.tests.fakes import InMemoryStateManager
+from app.ersharing import reporting
+from app.ersharing.reporting import DestinationReport, is_stalled, publish_report
+from app.ersharing.state import EVENTS_ACTION, EventRecord, Marker, NoteRecord, ShareState
+from app.ersharing.tests.fakes import InMemoryStateManager
 
 T0 = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
@@ -1617,10 +1618,10 @@ def test_stall_detection():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_state_and_reporting.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.state'`.
+Run: `pytest app/ersharing/tests/test_state_and_reporting.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.state'`.
 
-- [ ] **Step 3: Implement `app/er2er/state.py`**
+- [ ] **Step 3: Implement `app/ersharing/state.py`**
 
 ```python
 """Per-destination progress kept in Redis (spec §7.1, §8)."""
@@ -1699,7 +1700,7 @@ class ShareState:
         await self._manager.delete_state(self.integration_id, action_id, source_id=f"once:{key}")
 ```
 
-- [ ] **Step 4: Implement `app/er2er/reporting.py`**
+- [ ] **Step 4: Implement `app/ersharing/reporting.py`**
 
 ```python
 """What admins see in the activity log for each run and destination (spec §9)."""
@@ -1779,13 +1780,13 @@ def is_stalled(marker: Optional[Marker], now: datetime) -> bool:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_state_and_reporting.py -v`
+Run: `pytest app/ersharing/tests/test_state_and_reporting.py -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/er2er/state.py app/er2er/reporting.py app/er2er/tests/test_state_and_reporting.py
+git add app/ersharing/state.py app/ersharing/reporting.py app/ersharing/tests/test_state_and_reporting.py
 git commit -m "feat: add per-destination share state and run reports"
 ```
 
@@ -1794,8 +1795,8 @@ git commit -m "feat: add per-destination share state and run reports"
 ### Task 5: Area filters
 
 **Files:**
-- Create: `app/er2er/geo.py`
-- Test: `app/er2er/tests/test_geo.py`
+- Create: `app/ersharing/geo.py`
+- Test: `app/ersharing/tests/test_geo.py`
 
 **Interfaces:**
 - Consumes: `FakeSite.get_feature_group` / `ERSite.get_feature_group` (Task 2)
@@ -1806,13 +1807,13 @@ git commit -m "feat: add per-destination share state and run reports"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_geo.py`:
+`app/ersharing/tests/test_geo.py`:
 
 ```python
 import pytest
 
-from app.er2er.geo import load_area, shapes_from_feature_group
-from app.er2er.tests.fakes import FakeSite, make_event
+from app.ersharing.geo import load_area, shapes_from_feature_group
+from app.ersharing.tests.fakes import FakeSite, make_event
 from app.services.errors import IntegrationConfigurationError
 
 # ER nests GeoJSON features one level down inside each spatial feature.
@@ -1861,10 +1862,10 @@ async def test_missing_or_empty_feature_group_is_a_configuration_error():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_geo.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.geo'`.
+Run: `pytest app/ersharing/tests/test_geo.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.geo'`.
 
-- [ ] **Step 3: Implement `app/er2er/geo.py`**
+- [ ] **Step 3: Implement `app/ersharing/geo.py`**
 
 ```python
 """Area filters built from the source site's spatial feature groups (spec §7.1, §8)."""
@@ -1924,13 +1925,13 @@ async def load_area(site, feature_group_ids: Sequence[str]) -> Optional[Area]:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_geo.py -v`
+Run: `pytest app/ersharing/tests/test_geo.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/er2er/geo.py app/er2er/tests/test_geo.py
+git add app/ersharing/geo.py app/ersharing/tests/test_geo.py
 git commit -m "feat: add feature-group area filters"
 ```
 
@@ -1939,15 +1940,15 @@ git commit -m "feat: add feature-group area filters"
 ### Task 6: Destination categories and event types
 
 **Files:**
-- Create: `app/er2er/event_types.py`
-- Test: `app/er2er/tests/test_event_types.py`
+- Create: `app/ersharing/event_types.py`
+- Test: `app/ersharing/tests/test_event_types.py`
 
 **Interfaces:**
 - Consumes: `EventSettings` (Task 1), `FakeSite` (Task 2), `halts_site` (Task 2)
 - Produces:
-  - constants `ER2ER_SRC_FIELDS`, `ER2ER_HIDDEN_SECTION_ID`
+  - constants `PROVENANCE_FIELDS`, `PROVENANCE_SECTION_ID`
   - pure helpers:
-    - `add_er2er_fields_to_v2_schema(schema: dict) -> dict`
+    - `add_provenance_fields_to_v2_schema(schema: dict) -> dict`
     - `dest_event_type_value(value: str, s: EventSettings) -> str`
     - `dest_category_value(value: str, s: EventSettings) -> str`
     - `category_value(event_type: dict) -> str`
@@ -1960,7 +1961,7 @@ git commit -m "feat: add feature-group area filters"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_event_types.py`:
+`app/ersharing/tests/test_event_types.py`:
 
 ```python
 import json
@@ -1969,9 +1970,9 @@ from dataclasses import replace
 import pytest
 
 from app.actions.configurations import SyncEventsConfig
-from app.er2er.event_types import ER2ER_HIDDEN_SECTION_ID, EventTypeSync, clean_event_type, has_provenance_fields
-from app.er2er.modes import event_settings
-from app.er2er.tests.fakes import FakeSite
+from app.ersharing.event_types import PROVENANCE_SECTION_ID, EventTypeSync, clean_event_type, has_provenance_fields
+from app.ersharing.modes import event_settings
+from app.ersharing.tests.fakes import FakeSite
 from app.services.errors import IntegrationBadResponseError, IntegrationConnectionError
 
 SETTINGS = event_settings("https://sitea.pamdas.org", SyncEventsConfig())
@@ -2004,7 +2005,7 @@ def test_clean_event_type_prefixes_and_hides_provenance():
     schema = json.loads(cleaned["schema"])
     assert {"er2er_src_id", "er2er_src_system", "er2er_src_serial_number", "er2er_src_service_root"} <= set(
         schema["json"]["properties"])
-    assert schema["ui"]["sections"][ER2ER_HIDDEN_SECTION_ID]["isActive"] is False
+    assert schema["ui"]["sections"][PROVENANCE_SECTION_ID]["isActive"] is False
     assert schema["json"]["properties"]["species"]["enumNames"] == {"lion": "lion"}
     assert has_provenance_fields(cleaned)
 
@@ -2066,10 +2067,10 @@ async def test_halting_errors_propagate():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_event_types.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.event_types'`.
+Run: `pytest app/ersharing/tests/test_event_types.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.event_types'`.
 
-- [ ] **Step 3: Implement `app/er2er/event_types.py`**
+- [ ] **Step 3: Implement `app/ersharing/event_types.py`**
 
 The schema helpers are ported from `cdip-integrations/er2er/er2er_syncher.py:51-217` (commit `23ba4ea`), keeping only the v2 path.
 
@@ -2091,10 +2092,14 @@ SYNC_FIELDS_EVENT_TYPES = [
     "category", "is_collection", "geometry_type",
 ]
 
+# Legacy names kept for compatibility with existing copies (spec D8): v1 wrote
+# these "er2er" names onto hundreds of destination sites, and matching existing
+# copies, the echo guard and reconciliation all depend on them. Do not rename.
+#
 # Provenance fields written into every copy's event_details and declared in the
 # destination type's schema. serial_number is ER's integer serial, declared
 # "number" as the V2 meta-schema requires.
-ER2ER_SRC_FIELDS = {
+PROVENANCE_FIELDS = {
     "er2er_src_id": {"type": "string", "title": "ID of Source Event"},
     "er2er_src_system": {"type": "string", "title": "Name of Source ER System"},
     "er2er_src_serial_number": {"type": "number", "title": "Serial Number of Source Event"},
@@ -2102,7 +2107,7 @@ ER2ER_SRC_FIELDS = {
 }
 
 # A V2 field is hidden from the report form by living in an isActive=False section.
-ER2ER_HIDDEN_SECTION_ID = "section-er2er-hidden"
+PROVENANCE_SECTION_ID = "section-er2er-hidden"
 
 
 def _normalize_enum_names(properties: Dict) -> None:
@@ -2112,7 +2117,7 @@ def _normalize_enum_names(properties: Dict) -> None:
             prop["enumNames"] = {v: v for v in prop["enumNames"]}
 
 
-def add_er2er_fields_to_v2_schema(schema: Dict) -> Dict:
+def add_provenance_fields_to_v2_schema(schema: Dict) -> Dict:
     """Declare the provenance fields in a V2 schema, hidden. Idempotent."""
     json_schema = schema.setdefault("json", {})
     properties = json_schema.setdefault("properties", {})
@@ -2121,21 +2126,21 @@ def add_er2er_fields_to_v2_schema(schema: Dict) -> Dict:
     ui_sections = ui.setdefault("sections", {})
     ui_order = ui.setdefault("order", [])
 
-    section = ui_sections.setdefault(ER2ER_HIDDEN_SECTION_ID, {
+    section = ui_sections.setdefault(PROVENANCE_SECTION_ID, {
         "columns": 1, "isActive": False, "label": "", "leftColumn": [], "rightColumn": [], "conditions": [],
     })
     section["isActive"] = False
-    if ER2ER_HIDDEN_SECTION_ID not in ui_order:
-        ui_order.append(ER2ER_HIDDEN_SECTION_ID)
+    if PROVENANCE_SECTION_ID not in ui_order:
+        ui_order.append(PROVENANCE_SECTION_ID)
     in_section = {entry.get("name") for entry in section.get("leftColumn", [])}
 
-    for key, field in ER2ER_SRC_FIELDS.items():
+    for key, field in PROVENANCE_FIELDS.items():
         properties[key] = {"type": field["type"], "title": field["title"], "description": "", "deprecated": False}
         if field["type"] == "number":
-            ui_fields[key] = {"type": "NUMERIC", "placeholder": "", "parent": ER2ER_HIDDEN_SECTION_ID}
+            ui_fields[key] = {"type": "NUMERIC", "placeholder": "", "parent": PROVENANCE_SECTION_ID}
         else:
             ui_fields[key] = {"type": "TEXT", "inputType": "SHORT_TEXT", "placeholder": "",
-                              "parent": ER2ER_HIDDEN_SECTION_ID}
+                              "parent": PROVENANCE_SECTION_ID}
         if key not in in_section:
             section["leftColumn"].append({"type": "field", "name": key})
             in_section.add(key)
@@ -2160,7 +2165,7 @@ def clean_event_type(src_type: dict, s: EventSettings) -> dict:
     cleaned = {k: copy.deepcopy(v) for k, v in src_type.items() if k in SYNC_FIELDS_EVENT_TYPES}
     schema = src_type.get("schema") or {}
     schema = json.loads(schema) if isinstance(schema, str) else copy.deepcopy(schema)
-    cleaned["schema"] = json.dumps(add_er2er_fields_to_v2_schema(schema), indent=4)
+    cleaned["schema"] = json.dumps(add_provenance_fields_to_v2_schema(schema), indent=4)
     display = src_type.get("display") or src_type["value"]
     cleaned["display"] = f"{s.source.name}-{display}" if s.prepend_event_types else display
     cleaned["value"] = dest_event_type_value(src_type["value"], s)
@@ -2173,7 +2178,7 @@ def has_provenance_fields(event_type: dict) -> bool:
     if isinstance(schema, str):
         schema = json.loads(schema)
     properties = (schema.get("json") or {}).get("properties") or {}
-    return all(key in properties for key in ER2ER_SRC_FIELDS)
+    return all(key in properties for key in PROVENANCE_FIELDS)
 
 
 class EventTypeSync:
@@ -2214,7 +2219,7 @@ class EventTypeSync:
         if not self._s.update_schema:
             if existing is None or not has_provenance_fields(existing):
                 raise IntegrationConfigurationError(
-                    "missing at the destination or lacks the er2er provenance fields, "
+                    "missing at the destination or lacks the EarthRanger Sharing provenance fields, "
                     "and updating destination event types is turned off"
                 )
             return existing
@@ -2248,13 +2253,13 @@ class EventTypeSync:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_event_types.py -v`
+Run: `pytest app/ersharing/tests/test_event_types.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/er2er/event_types.py app/er2er/tests/test_event_types.py
+git add app/ersharing/event_types.py app/ersharing/tests/test_event_types.py
 git commit -m "feat: sync destination categories and v2 event types"
 ```
 
@@ -2263,8 +2268,8 @@ git commit -m "feat: sync destination categories and v2 event types"
 ### Task 7: Event cleaning, filters and echo guard
 
 **Files:**
-- Create: `app/er2er/events.py`
-- Test: `app/er2er/tests/test_events.py`
+- Create: `app/ersharing/events.py`
+- Test: `app/ersharing/tests/test_events.py`
 
 **Interfaces:**
 - Consumes: `EventSettings` (Task 1), `dest_event_type_value` (Task 6), `Area` (Task 5), `EventRecord` (Task 4), `parse_dt`, `site_host` (Task 1)
@@ -2279,7 +2284,7 @@ git commit -m "feat: sync destination categories and v2 event types"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_events.py`:
+`app/ersharing/tests/test_events.py`:
 
 ```python
 from dataclasses import replace
@@ -2287,11 +2292,11 @@ from dataclasses import replace
 import pytest
 
 from app.actions.configurations import SyncEventsConfig
-from app.er2er.events import clean_event, event_label, incident_ids, is_echo, is_newer, wanted
-from app.er2er.modes import event_settings
-from app.er2er.state import EventRecord
-from app.er2er.tests.fakes import make_event
-from app.er2er.timeutil import parse_dt
+from app.ersharing.events import clean_event, event_label, incident_ids, is_echo, is_newer, wanted
+from app.ersharing.modes import event_settings
+from app.ersharing.state import EventRecord
+from app.ersharing.tests.fakes import make_event
+from app.ersharing.timeutil import parse_dt
 
 SETTINGS = event_settings("https://sitea.pamdas.org", SyncEventsConfig())
 DEST_TYPE = {"value": "sitea_wildlife_sighting", "display": "Sitea-Wildlife Sighting"}
@@ -2359,10 +2364,10 @@ def test_incident_ids_and_label():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_events.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.events'`.
+Run: `pytest app/ersharing/tests/test_events.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.events'`.
 
-- [ ] **Step 3: Implement `app/er2er/events.py`**
+- [ ] **Step 3: Implement `app/ersharing/events.py`**
 
 `clean_event`'s title rules are ported from `cdip-integrations/er2er/er2er_syncher.py:282-318`.
 
@@ -2439,13 +2444,13 @@ def event_label(event: dict) -> str:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_events.py -v`
+Run: `pytest app/ersharing/tests/test_events.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/er2er/events.py app/er2er/tests/test_events.py
+git add app/ersharing/events.py app/ersharing/tests/test_events.py
 git commit -m "feat: clean events with provenance, filters and echo guard"
 ```
 
@@ -2454,8 +2459,8 @@ git commit -m "feat: clean events with provenance, filters and echo guard"
 ### Task 8: Notes, files and incidents
 
 **Files:**
-- Create: `app/er2er/notes_files.py`
-- Test: `app/er2er/tests/test_notes_files.py`
+- Create: `app/ersharing/notes_files.py`
+- Test: `app/ersharing/tests/test_notes_files.py`
 
 **Interfaces:**
 - Consumes: `EventRecord`, `NoteRecord` (Task 4), `incident_ids` (Task 7), `halts_site` (Task 2), `DestinationReport` (Task 4), `FakeSite` (Task 2)
@@ -2472,19 +2477,19 @@ git commit -m "feat: clean events with provenance, filters and echo guard"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_notes_files.py`:
+`app/ersharing/tests/test_notes_files.py`:
 
 ```python
 import pytest
 from gundi_core.events import LogLevel
 
-from app.er2er.notes_files import (
+from app.ersharing.notes_files import (
     MAX_FILE_BYTES, adopt_record, apply_files, apply_incidents, apply_notes, note_digest, plan_files, plan_notes,
 )
-from app.er2er.reporting import DestinationReport
-from app.er2er.state import EventRecord, NoteRecord
-from app.er2er.tests.fakes import FakeSite, make_event
-from app.er2er.timeutil import parse_dt
+from app.ersharing.reporting import DestinationReport
+from app.ersharing.state import EventRecord, NoteRecord
+from app.ersharing.tests.fakes import FakeSite, make_event
+from app.ersharing.timeutil import parse_dt
 from app.services.errors import IntegrationBadResponseError
 
 T0 = parse_dt("2026-10-01T00:00:00Z")
@@ -2575,10 +2580,10 @@ async def test_apply_incidents_links_unlinks_and_warns_on_unshared_incident():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_notes_files.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.notes_files'`.
+Run: `pytest app/ersharing/tests/test_notes_files.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.notes_files'`.
 
-- [ ] **Step 3: Implement `app/er2er/notes_files.py`**
+- [ ] **Step 3: Implement `app/ersharing/notes_files.py`**
 
 ```python
 """Incremental notes, attachments and incident links for one event copy (spec §7.4–7.5)."""
@@ -2728,7 +2733,7 @@ async def apply_incidents(dest, dest_event_id: str, wanted_ids: List[str], recor
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_notes_files.py -v`
+Run: `pytest app/ersharing/tests/test_notes_files.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Verify note PATCH against a dev ER (one-off)**
@@ -2745,7 +2750,7 @@ Expected: `200`. If it returns `404` or `405`, the fallback path above is what p
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/er2er/notes_files.py app/er2er/tests/test_notes_files.py
+git add app/ersharing/notes_files.py app/ersharing/tests/test_notes_files.py
 git commit -m "feat: copy notes, files and incident links incrementally"
 ```
 
@@ -2754,8 +2759,8 @@ git commit -m "feat: copy notes, files and incident links incrementally"
 ### Task 9: Syncing events to one destination
 
 **Files:**
-- Create: `app/er2er/sync_events.py` (part 1: per-destination sync)
-- Test: `app/er2er/tests/test_sync_events.py`
+- Create: `app/ersharing/sync_events.py` (part 1: per-destination sync)
+- Test: `app/ersharing/tests/test_sync_events.py`
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–8
@@ -2767,7 +2772,7 @@ git commit -m "feat: copy notes, files and incident links incrementally"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_sync_events.py`:
+`app/ersharing/tests/test_sync_events.py`:
 
 ```python
 import time
@@ -2775,13 +2780,13 @@ import time
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncEventsConfig
-from app.er2er.destinations import Destination
-from app.er2er.modes import event_settings
-from app.er2er.reporting import DestinationReport
-from app.er2er.state import EVENTS_ACTION, EventRecord, ShareState
-from app.er2er.sync_events import EventsRun, marker_key, sync_destination
-from app.er2er.tests.fakes import FakeSite, InMemoryStateManager, make_event
-from app.er2er.timeutil import parse_dt
+from app.ersharing.destinations import Destination
+from app.ersharing.modes import event_settings
+from app.ersharing.reporting import DestinationReport
+from app.ersharing.state import EVENTS_ACTION, EventRecord, ShareState
+from app.ersharing.sync_events import EventsRun, marker_key, sync_destination
+from app.ersharing.tests.fakes import FakeSite, InMemoryStateManager, make_event
+from app.ersharing.timeutil import parse_dt
 from app.services.errors import IntegrationBadResponseError, IntegrationConnectionError
 
 SOURCE_URL = "https://sitea.pamdas.org"
@@ -2922,10 +2927,10 @@ async def test_out_of_time_stops_and_flags_continuation():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_sync_events.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.sync_events'`.
+Run: `pytest app/ersharing/tests/test_sync_events.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.sync_events'`.
 
-- [ ] **Step 3: Implement part 1 of `app/er2er/sync_events.py`**
+- [ ] **Step 3: Implement part 1 of `app/ersharing/sync_events.py`**
 
 ```python
 """sync_events: mirror source events onto each destination (spec §7)."""
@@ -3042,13 +3047,13 @@ async def _write_event(dest, event: dict, copy: dict, record: Optional[EventReco
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_sync_events.py -v`
+Run: `pytest app/ersharing/tests/test_sync_events.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/er2er/sync_events.py app/er2er/tests/test_sync_events.py
+git add app/ersharing/sync_events.py app/ersharing/tests/test_sync_events.py
 git commit -m "feat: mirror events onto one destination with resumable markers"
 ```
 
@@ -3057,9 +3062,9 @@ git commit -m "feat: mirror events onto one destination with resumable markers"
 ### Task 10: Event reconciliation and the `sync_events` run
 
 **Files:**
-- Modify: `app/er2er/sync_events.py` (append part 2)
+- Modify: `app/ersharing/sync_events.py` (append part 2)
 - Modify: `app/actions/handlers.py` (currently empty)
-- Test: `app/er2er/tests/test_sync_events_run.py`
+- Test: `app/ersharing/tests/test_sync_events_run.py`
 
 **Interfaces:**
 - Consumes: `sync_destination`, `EventsRun`, `marker_key` (Task 9); `resolve_destinations` (Task 3); `open_site`, `auth_config_of` (Task 2); `publish_report`, `is_stalled` (Task 4); `trigger_action`, `log_action_activity`
@@ -3070,7 +3075,7 @@ git commit -m "feat: mirror events onto one destination with resumable markers"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_sync_events_run.py`:
+`app/ersharing/tests/test_sync_events_run.py`:
 
 ```python
 import time
@@ -3080,14 +3085,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncEventsConfig
-from app.er2er import sync_events
-from app.er2er.destinations import Destination, SkippedDestination
-from app.er2er.modes import event_settings
-from app.er2er.reporting import DestinationReport
-from app.er2er.state import EVENTS_ACTION, ShareState
-from app.er2er.sync_events import EventsRun, marker_key, reconcile_destination, run_sync_events
-from app.er2er.tests.fakes import FakeSite, InMemoryStateManager, make_event
-from app.er2er.timeutil import parse_dt, utcnow
+from app.ersharing import sync_events
+from app.ersharing.destinations import Destination, SkippedDestination
+from app.ersharing.modes import event_settings
+from app.ersharing.reporting import DestinationReport
+from app.ersharing.state import EVENTS_ACTION, ShareState
+from app.ersharing.sync_events import EventsRun, marker_key, reconcile_destination, run_sync_events
+from app.ersharing.tests.fakes import FakeSite, InMemoryStateManager, make_event
+from app.ersharing.timeutil import parse_dt, utcnow
 from app.services.errors import IntegrationAuthError, IntegrationConnectionError
 
 SOURCE_URL = "https://sitea.pamdas.org"
@@ -3220,10 +3225,10 @@ async def test_stall_warning_when_errors_persist(world, monkeypatch):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_sync_events_run.py -v`
+Run: `pytest app/ersharing/tests/test_sync_events_run.py -v`
 Expected: `ImportError: cannot import name 'reconcile_destination'`.
 
-- [ ] **Step 3: Append part 2 to `app/er2er/sync_events.py`**
+- [ ] **Step 3: Append part 2 to `app/ersharing/sync_events.py`**
 
 Add these imports to the top of the file:
 
@@ -3348,9 +3353,9 @@ async def _run(integration, config, state: ShareState):
 - [ ] **Step 4: Write `app/actions/handlers.py`**
 
 ```python
-"""Action handlers. Keep these thin: the work lives in app/er2er.
+"""Action handlers. Keep these thin: the work lives in app/ersharing.
 
-app/actions/__init__.py imports this module at import time, so app.er2er is
+app/actions/__init__.py imports this module at import time, so app.ersharing is
 imported inside each handler; a top-level import would be circular.
 """
 from gundi_core.schemas.v2 import Integration
@@ -3363,13 +3368,13 @@ from .configurations import SyncEventsConfig
 @crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_sync_events(integration: Integration, action_config: SyncEventsConfig):
-    from app.er2er.sync_events import run_sync_events
+    from app.ersharing.sync_events import run_sync_events
     return await run_sync_events(integration, action_config)
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_sync_events_run.py app/er2er/tests/test_sync_events.py -v`
+Run: `pytest app/ersharing/tests/test_sync_events_run.py app/ersharing/tests/test_sync_events.py -v`
 Expected: all PASS.
 
 Then run: `python -c "from app.actions import action_handlers; print(sorted(action_handlers))"`
@@ -3378,7 +3383,7 @@ Expected: `['sync_events']`
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/er2er/sync_events.py app/er2er/tests/test_sync_events_run.py app/actions/handlers.py
+git add app/ersharing/sync_events.py app/ersharing/tests/test_sync_events_run.py app/actions/handlers.py
 git commit -m "feat: add scheduled sync_events with daily delete reconciliation"
 ```
 
@@ -3387,8 +3392,8 @@ git commit -m "feat: add scheduled sync_events with daily delete reconciliation"
 ### Task 11: Observation filters, payloads and markers
 
 **Files:**
-- Create: `app/er2er/observations.py`
-- Test: `app/er2er/tests/test_observations.py`
+- Create: `app/ersharing/observations.py`
+- Test: `app/ersharing/tests/test_observations.py`
 
 **Interfaces:**
 - Consumes: `ObservationSettings` (Task 1), `Marker` (Task 4), `parse_dt` (Task 1), `make_observation` (Task 2 fakes)
@@ -3405,20 +3410,20 @@ git commit -m "feat: add scheduled sync_events with daily delete reconciliation"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_observations.py`:
+`app/ersharing/tests/test_observations.py`:
 
 ```python
 from dataclasses import replace
 
 from app.actions.configurations import SyncObservationsConfig
-from app.er2er.modes import observation_settings
-from app.er2er.observations import (
+from app.ersharing.modes import observation_settings
+from app.ersharing.observations import (
     OVERLAP, add_lineage, advance, batches, build_payload, has_valid_location, in_assignment, is_new,
     parse_assignments, read_start,
 )
-from app.er2er.state import Marker
-from app.er2er.tests.fakes import make_observation
-from app.er2er.timeutil import parse_dt
+from app.ersharing.state import Marker
+from app.ersharing.tests.fakes import make_observation
+from app.ersharing.timeutil import parse_dt
 
 T0 = parse_dt("2026-10-01T00:00:00Z")
 SETTINGS = observation_settings("https://sitea.pamdas.org", SyncObservationsConfig())
@@ -3499,10 +3504,10 @@ def test_batches():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_observations.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.observations'`.
+Run: `pytest app/ersharing/tests/test_observations.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.observations'`.
 
-- [ ] **Step 3: Implement `app/er2er/observations.py`**
+- [ ] **Step 3: Implement `app/ersharing/observations.py`**
 
 ```python
 """Subject-track filters, payloads and markers (spec §8). Pure functions."""
@@ -3622,13 +3627,13 @@ def batches(items: list, size: int = MAX_BATCH) -> Iterator[list]:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_observations.py -v`
+Run: `pytest app/ersharing/tests/test_observations.py -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/er2er/observations.py app/er2er/tests/test_observations.py
+git add app/ersharing/observations.py app/ersharing/tests/test_observations.py
 git commit -m "feat: add observation filters, payloads and markers"
 ```
 
@@ -3637,9 +3642,9 @@ git commit -m "feat: add observation filters, payloads and markers"
 ### Task 12: The `sync_observations` run
 
 **Files:**
-- Create: `app/er2er/sync_observations.py`
+- Create: `app/ersharing/sync_observations.py`
 - Modify: `app/actions/handlers.py` (add the handler)
-- Test: `app/er2er/tests/test_sync_observations.py`
+- Test: `app/ersharing/tests/test_sync_observations.py`
 
 **Interfaces:**
 - Consumes: Task 11 functions; `ShareState`, `Marker`, `OBSERVATIONS_ACTION` (Task 4); `open_site`, `auth_config_of`, `halts_site` (Task 2); `resolve_destinations` (Task 3); `load_area` (Task 5); `publish_report`, `is_stalled` (Task 4); `site_host` (Task 1)
@@ -3651,7 +3656,7 @@ git commit -m "feat: add observation filters, payloads and markers"
 
 - [ ] **Step 1: Write the failing tests**
 
-`app/er2er/tests/test_sync_observations.py`:
+`app/ersharing/tests/test_sync_observations.py`:
 
 ```python
 from types import SimpleNamespace
@@ -3660,12 +3665,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncObservationsConfig
-from app.er2er import sync_observations
-from app.er2er.destinations import Destination
-from app.er2er.state import OBSERVATIONS_ACTION, ShareState
-from app.er2er.sync_observations import run_sync_observations, select_subjects, subject_marker_key
-from app.er2er.tests.fakes import FakeSite, InMemoryStateManager, make_observation
-from app.er2er.timeutil import parse_dt
+from app.ersharing import sync_observations
+from app.ersharing.destinations import Destination
+from app.ersharing.state import OBSERVATIONS_ACTION, ShareState
+from app.ersharing.sync_observations import run_sync_observations, select_subjects, subject_marker_key
+from app.ersharing.tests.fakes import FakeSite, InMemoryStateManager, make_observation
+from app.ersharing.timeutil import parse_dt
 from app.services.errors import IntegrationBadResponseError, IntegrationConnectionError
 
 SOURCE_URL = "https://sitea.pamdas.org"
@@ -3788,10 +3793,10 @@ async def test_out_of_time_triggers_continuation(world, monkeypatch):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `pytest app/er2er/tests/test_sync_observations.py -v`
-Expected: `ModuleNotFoundError: No module named 'app.er2er.sync_observations'`.
+Run: `pytest app/ersharing/tests/test_sync_observations.py -v`
+Expected: `ModuleNotFoundError: No module named 'app.ersharing.sync_observations'`.
 
-- [ ] **Step 3: Implement `app/er2er/sync_observations.py`**
+- [ ] **Step 3: Implement `app/ersharing/sync_observations.py`**
 
 ```python
 """sync_observations: share subject tracks with each destination (spec §8)."""
@@ -3961,19 +3966,19 @@ Add `SyncObservationsConfig` to the configurations import, then append:
 @crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_sync_observations(integration: Integration, action_config: SyncObservationsConfig):
-    from app.er2er.sync_observations import run_sync_observations
+    from app.ersharing.sync_observations import run_sync_observations
     return await run_sync_observations(integration, action_config)
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `pytest app/er2er/tests/test_sync_observations.py -v`
+Run: `pytest app/ersharing/tests/test_sync_observations.py -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/er2er/sync_observations.py app/er2er/tests/test_sync_observations.py app/actions/handlers.py
+git add app/ersharing/sync_observations.py app/ersharing/tests/test_sync_observations.py app/actions/handlers.py
 git commit -m "feat: add scheduled sync_observations with per-subject markers"
 ```
 
@@ -4004,8 +4009,8 @@ from app.actions import action_handlers, handlers
 from app.actions.configurations import (
     AuthenticateConfig, ListEventTypesQuery, ListFeatureGroupsQuery, ListSubjectGroupsQuery,
 )
-from app.er2er import clients
-from app.er2er.tests.fakes import FakeSite
+from app.ersharing import clients
+from app.ersharing.tests.fakes import FakeSite
 from app.services.errors import IntegrationAuthError
 
 INTEGRATION = SimpleNamespace(
@@ -4092,7 +4097,7 @@ Append:
 
 ```python
 async def action_auth(integration: Integration, action_config: AuthenticateConfig):
-    from app.er2er import clients
+    from app.ersharing import clients
     from app.services.errors import IntegrationError
 
     if action_config.authentication_type == ERAuthenticationType.TOKEN and not action_config.token:
@@ -4120,7 +4125,7 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
 
 
 async def _source_site(integration):
-    from app.er2er import clients
+    from app.ersharing import clients
     return clients.open_site(integration.base_url, clients.auth_config_of(integration.configurations), role="source")
 
 
@@ -4186,13 +4191,13 @@ INTEGRATION_TYPE_NAME=EarthRanger Sharing
 Replace `README.md` with:
 
 ````markdown
-# Gundi Integration: EarthRanger Sharing (ER2ER)
+# Gundi Integration: EarthRanger Sharing
 
 Mirrors events and subject tracks from one EarthRanger site (the connection's
 source) to every EarthRanger destination of the connection. It is a one-way
 live mirror: edits, notes, attachments, incident links and deletes follow the source.
 
-Design: `docs/superpowers/specs/2026-10-15-er2er-v2-sharing-design.md`.
+Design: `docs/superpowers/specs/2026-10-15-ersharing-v2-design.md`.
 
 ## Actions
 
@@ -4214,8 +4219,8 @@ pip install -r requirements.txt
 pytest
 ```
 
-Code lives in `app/er2er/`; `app/actions/handlers.py` only wires actions to it.
-Handlers import `app.er2er` inside function bodies (see the module docstring).
+Code lives in `app/ersharing/`; `app/actions/handlers.py` only wires actions to it.
+Handlers import `app.ersharing` inside function bodies (see the module docstring).
 ````
 
 - [ ] **Step 3: Run the whole suite**

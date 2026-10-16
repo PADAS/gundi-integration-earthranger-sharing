@@ -1,4 +1,4 @@
-# ER2ER Sharing on Gundi v2 — Design
+# EarthRanger Sharing on Gundi v2 — Design
 
 - **Date:** 2026-10-15
 - **Ticket:** [GUNDI-5810](https://allenai.atlassian.net/browse/GUNDI-5810) (related: GUNDI-5799, ERCS-4130, ERCS-4795, ERCS-5754)
@@ -7,7 +7,7 @@
 
 ## 1. Context
 
-EarthRanger-to-EarthRanger (ER2ER) sharing copies data from one ER site to another. Today it is two Gundi v1 Kubernetes CronJobs that write straight to the destination ER:
+EarthRanger Sharing copies data from one ER site to another. Today it is two Gundi v1 Kubernetes CronJobs (the legacy "er2er" jobs) that write straight to the destination ER:
 
 | | Events | Subject observations |
 |---|---|---|
@@ -58,6 +58,7 @@ Problems:
 | D5 | Migrate all v1 shares with a cdip management command | Hundreds of shares. |
 | D6 | Build in `gundi-integration-earthranger-sharing`, synced to the current template | Gets the current template library (timeouts, PubSub redelivery, ephemeral reference actions). |
 | D7 | No v1 event-type support | v1 event types are not used going forward. |
+| D8 | Product name "EarthRanger Sharing"; `ersharing` in code. The stored provenance names (`er2er_src_*` fields, `section-er2er-hidden`) keep their legacy spelling | v1 wrote them onto hundreds of destination sites. Matching existing copies, the echo guard and reconciliation depend on them, and renaming would add a second hidden field set to every destination event type. |
 
 ## 5. Architecture
 
@@ -95,16 +96,16 @@ Each unit is small, pure where possible, and tested on its own.
 
 - `app/actions/configurations.py` — auth, reference and pull configs (§6).
 - `app/actions/handlers.py` — thin action handlers: load config, resolve destinations, loop, log activity.
-- `app/er2er/clients.py` — builds source and destination `AsyncERClient`s; translates ER failures into `IntegrationAuthError`, `IntegrationConnectionError`, `IntegrationRateLimitError` and `IntegrationConfigurationError` (pattern from `gundi-integration-earthranger`'s `_translating_er_client`).
-- `app/er2er/destinations.py` — resolves the connection's destinations and credentials; rejects same-site destinations.
-- `app/er2er/naming.py` — source system code and name derivation; prefixing of categories, types and titles.
-- `app/er2er/event_types.py` — destination category and type sync (v2 schema; hidden provenance section).
-- `app/er2er/events.py` — event filtering, cleaning, provenance, loop guard, create/update decision.
-- `app/er2er/notes_files.py` — note and file diffing against recorded IDs.
-- `app/er2er/observations.py` — subject selection, assignment-range / location / area filters, batching, sharing payloads.
-- `app/er2er/geo.py` — area-filter geometry (shapely).
-- `app/er2er/state.py` — typed per-destination markers and per-event records over `IntegrationStateManager`.
-- `app/er2er/modes.py` — effective settings from simple mode plus compatibility overrides.
+- `app/ersharing/clients.py` — builds source and destination `AsyncERClient`s; translates ER failures into `IntegrationAuthError`, `IntegrationConnectionError`, `IntegrationRateLimitError` and `IntegrationConfigurationError` (pattern from `gundi-integration-earthranger`'s `_translating_er_client`).
+- `app/ersharing/destinations.py` — resolves the connection's destinations and credentials; rejects same-site destinations.
+- `app/ersharing/naming.py` — source system code and name derivation; prefixing of categories, types and titles.
+- `app/ersharing/event_types.py` — destination category and type sync (v2 schema; hidden provenance section).
+- `app/ersharing/events.py` — event filtering, cleaning, provenance, loop guard, create/update decision.
+- `app/ersharing/notes_files.py` — note and file diffing against recorded IDs.
+- `app/ersharing/observations.py` — subject selection, assignment-range / location / area filters, batching, sharing payloads.
+- `app/ersharing/geo.py` — area-filter geometry (shapely).
+- `app/ersharing/state.py` — typed per-destination markers and per-event records over `IntegrationStateManager`.
+- `app/ersharing/modes.py` — effective settings from simple mode plus compatibility overrides.
 
 ## 6. Configuration
 
@@ -240,7 +241,7 @@ Activity logging:
 - **Stall warning:** a warning when a destination's marker has not moved for 6 hours while the source has newer data.
 - `@activity_logger` marks run start, completion and failure; errors are classified with the template's `IntegrationError` hierarchy so the portal shows status and retryability.
 
-## 10. Migration (cdip: `migrate_er2er_v1`)
+## 10. Migration (cdip: `migrate_ersharing_v1`)
 
 The command is a dry run by default. Batch selectors: `--ids`, `--owner`, `--limit`.
 
@@ -326,6 +327,6 @@ The command is a dry run by default. Batch selectors: `--ids`, `--owner`, `--lim
 ## 14. Risks and open items
 
 - **Service-account access to destination auth configs.** The ER dispatcher already reads them through `gundi-client`; confirm the action runner's service account has the same access. If not, add a narrow cdip API permission.
-- **v1 settings distribution.** Run `scripts/er2er_v1_inventory.py` (read-only; `python3 manage.py shell < …` in a portal pod) in prod to confirm simple-mode defaults and size the compatibility-mode population before writing the migration command.
+- **v1 settings distribution.** Run `scripts/ersharing_v1_inventory.py` (read-only; `python3 manage.py shell < …` in a portal pod) in prod to confirm simple-mode defaults and size the compatibility-mode population before writing the migration command.
 - **Destination token permissions.** v1 event and subject destinations may hold tokens without event-type-create permission. Save-time validation and the migration report surface these.
 - **Load.** Hundreds of shares on 5-minute schedules. Size the runner's concurrency and Cloud Run settings during the friendly-site rollout; destinations shared by many sources may need rate limiting.
