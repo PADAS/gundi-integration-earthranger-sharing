@@ -1,1 +1,4 @@
 # Add your integration-specific dependencies here
+earthranger-client~=1.15.0
+shapely~=2.0
+python-dateutil~=2.9
