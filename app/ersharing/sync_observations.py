@@ -107,7 +107,7 @@ async def _run(integration, config, state: ShareState):
                 sites[d.id] = await stack.enter_async_context(open_site(d.url, d.auth, role="destination"))
             except IntegrationError as e:
                 reports[d.id].error(e.message)
-        area = await load_area(source, share.area_feature_groups)
+        area = await load_area(source, share.area_feature_groups, polygons_only=True)
         subjects = await select_subjects(source, share.subject_groups)
         assignments = await _load_assignments(source, [str(s["id"]) for s in subjects])
         src_user = share.src_user or (await source.get_me()).get("username", "")

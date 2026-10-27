@@ -3,6 +3,7 @@
 Every ERSite call raises an IntegrationError subclass labelled with the site and
 carrying `site_role`, never erclient or httpx exceptions (spec §9).
 """
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from app.services.errors import (
 )
 from app.services.utils import find_config_for_action
 from .naming import site_host, site_root
+from .timeutil import parse_dt
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,35 @@ def _is_rejected_login(exc) -> bool:
 
 
 _ER_CALL_FAILURES = (ERClientException, httpx.HTTPError, ValueError, KeyError)
+
+# Pauses between tries within a run (spec §9): three tries in all.
+RETRY_WAITS = (1.0, 4.0)
+
+
+def is_retryable(exc: Exception, *, repeat_safe: bool = True) -> bool:
+    """A 429 is always worth another try: the site didn't act on the request. Timeouts,
+    lost connections and server errors are retried only when sending the request twice
+    can't create a second copy of anything."""
+    status = _status_of(exc)
+    if status == 429:
+        return True
+    if not repeat_safe or _is_rejected_login(exc):
+        return False
+    if isinstance(exc, httpx.TransportError) or (type(exc) is ERClientException and status is None):
+        return True
+    return status is not None and status >= 500
+
+
+async def with_retries(call, *, repeat_safe: bool = True):
+    """Await `call()`, trying again after each pause in RETRY_WAITS while the failure is retryable."""
+    for wait in (*RETRY_WAITS, None):
+        try:
+            return await call()
+        except Exception as e:
+            if wait is None or not is_retryable(e, repeat_safe=repeat_safe):
+                raise
+            logger.info("EarthRanger call failed (%s); trying again in %s s", type(e).__name__, wait)
+            await asyncio.sleep(wait)
 
 
 def as_integration_error(exc: Exception, *, not_found_is_configuration: bool = True) -> IntegrationError:
@@ -168,23 +199,23 @@ class ERSite:
         labelled.site_role = self.role
         return labelled
 
-    async def _call(self, awaitable, *, none_on_404: bool = False):
+    async def _call(self, call, *, none_on_404: bool = False, repeat_safe: bool = True):
         try:
-            return await awaitable
+            return await with_retries(call, repeat_safe=repeat_safe)
         except _ER_CALL_FAILURES as e:
             if none_on_404 and _status_of(e) == 404:
                 return None
             raise self._translate(e) from e
 
     async def get_me(self) -> dict:
-        return await self._call(self._client.get_me())
+        return await self._call(lambda: self._client.get_me())
 
     async def can_read(self, path: str, params: Optional[dict] = None) -> bool:
         """Read one item from an ER list endpoint. ER grants subject and track access
         through subject-group permission sets, so user/me's model permissions can't
         answer this; only a 403 means the token can't read it."""
         try:
-            await self._call(self._client._get(path, params={"page_size": 1, **(params or {})}))
+            await self._call(lambda: self._client._get(path, params={"page_size": 1, **(params or {})}))
         except IntegrationAuthError as e:
             if e.status_code == 403:
                 return False
@@ -194,26 +225,36 @@ class ERSite:
     async def iter_events_updated_since(
         self, since: datetime, *, page_size: int = 100, with_notes_and_files: bool = True
     ) -> AsyncIterator[List[dict]]:
-        events = self._client.get_events(
-            filter=json.dumps({"update_date": {"lower": since.isoformat()}}),
-            sort_by="updated_at",
-            include_details=True,
-            include_notes=with_notes_and_files,
-            include_files=with_notes_and_files,
-            include_updates=False,
-            include_related_events=False,
-            page_size=page_size,
-            batch_size=page_size,
-        )
-        try:
-            async for page in events:
-                yield page
-        except _ER_CALL_FAILURES as e:
-            raise self._translate(e) from e
+        waits = iter(RETRY_WAITS)
+        while True:
+            events = self._client.get_events(
+                filter=json.dumps({"update_date": {"lower": since.isoformat()}}),
+                sort_by="updated_at",
+                include_details=True,
+                include_notes=with_notes_and_files,
+                include_files=with_notes_and_files,
+                include_updates=False,
+                include_related_events=False,
+                page_size=page_size,
+                batch_size=page_size,
+            )
+            try:
+                async for page in events:
+                    newest = max([since, *(parse_dt(e["updated_at"]) for e in page if e.get("updated_at"))])
+                    yield page
+                    # A retry reads again from the last page handed out; repeats are skipped downstream.
+                    since = newest
+                return
+            except _ER_CALL_FAILURES as e:
+                wait = next(waits, None)
+                if wait is None or not is_retryable(e):
+                    raise self._translate(e) from e
+                logger.info("Reading events failed (%s); trying again in %s s", type(e).__name__, wait)
+                await asyncio.sleep(wait)
 
     async def get_event(self, event_id: str, *, with_notes_and_files: bool = False) -> Optional[dict]:
         return await self._call(
-            self._client.get_event(
+            lambda: self._client.get_event(
                 event_id=event_id, include_details=True,
                 include_notes=with_notes_and_files, include_files=with_notes_and_files,
             ),
@@ -221,23 +262,23 @@ class ERSite:
         )
 
     async def post_event(self, event: dict) -> dict:
-        return await self._call(self._client.post_report(event))
+        return await self._call(lambda: self._client.post_report(event), repeat_safe=False)
 
     async def patch_event(self, event_id: str, data: dict) -> dict:
-        return await self._call(self._client.patch_report(event_id, data))
+        return await self._call(lambda: self._client.patch_report(event_id, data))
 
     async def delete_event(self, event_id: str):
-        return await self._call(self._client.delete_event(event_id))
+        return await self._call(lambda: self._client.delete_event(event_id))
 
     async def post_note(self, event_id: str, text: str) -> dict:
-        created = await self._call(self._client.post_event_note(event_id, text))
+        created = await self._call(lambda: self._client.post_event_note(event_id, text), repeat_safe=False)
         return created[0] if isinstance(created, list) else created
 
     async def patch_note(self, event_id: str, note_id: str, text: str):
-        return await self._call(self._client._patch(f"activity/event/{event_id}/note/{note_id}", payload={"text": text}))
+        return await self._call(lambda: self._client._patch(f"activity/event/{event_id}/note/{note_id}", payload={"text": text}))
 
     async def delete_note(self, event_id: str, note_id: str):
-        return await self._call(self._client.delete_event_note(event_id, note_id))
+        return await self._call(lambda: self._client.delete_event_note(event_id, note_id))
 
     def _attachment_failure(self, status: int) -> IntegrationError:
         """A file the site won't hand over is skipped on its own; site-wide trouble
@@ -291,56 +332,56 @@ class ERSite:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, safe_filename(filename))
             try:
-                fits = await self._stream_to(url, path, max_bytes)
+                fits = await with_retries(lambda: self._stream_to(url, path, max_bytes))
             except _ER_CALL_FAILURES as e:
                 raise self._translate(e) from e
             yield path if fits else None
 
     async def post_file(self, event_id: str, path: str, comment: str = "") -> dict:
-        return await self._call(self._client.post_event_file(event_id, filepath=path, comment=comment))
+        return await self._call(lambda: self._client.post_event_file(event_id, filepath=path, comment=comment), repeat_safe=False)
 
     async def delete_file(self, event_id: str, file_id: str):
-        return await self._call(self._client.delete_event_file(event_id, file_id))
+        return await self._call(lambda: self._client.delete_event_file(event_id, file_id))
 
     async def add_to_incident(self, event_id: str, incident_id: str):
-        return await self._call(self._client.add_event_to_incident(event_id, incident_id))
+        return await self._call(lambda: self._client.add_event_to_incident(event_id, incident_id), repeat_safe=False)
 
     async def remove_from_incident(self, event_id: str, incident_id: str):
-        return await self._call(self._client.remove_event_from_incident(event_id, incident_id))
+        return await self._call(lambda: self._client.remove_event_from_incident(event_id, incident_id))
 
     async def get_event_categories(self) -> List[dict]:
-        return _results(await self._call(self._client.get_event_categories(include_inactive=True)))
+        return _results(await self._call(lambda: self._client.get_event_categories(include_inactive=True)))
 
     async def post_event_category(self, data: dict):
-        return await self._call(self._client.post_event_category(data))
+        return await self._call(lambda: self._client.post_event_category(data), repeat_safe=False)
 
     async def patch_event_category(self, data: dict):
-        return await self._call(self._client.patch_event_category(data))
+        return await self._call(lambda: self._client.patch_event_category(data))
 
     async def list_event_types_v2(self) -> List[dict]:
-        return _results(await self._call(self._client.get_event_types(include_schema=True, version=VERSION_2_0)))
+        return _results(await self._call(lambda: self._client.get_event_types(include_schema=True, version=VERSION_2_0)))
 
     async def get_event_type_v2(self, value: str) -> Optional[dict]:
         return await self._call(
-            self._client.get_event_type(value, version=VERSION_2_0, include_schema=True), none_on_404=True
+            lambda: self._client.get_event_type(value, version=VERSION_2_0, include_schema=True), none_on_404=True
         )
 
     async def post_event_type_v2(self, data: dict):
-        return await self._call(self._client.post_event_type(data, version=VERSION_2_0))
+        return await self._call(lambda: self._client.post_event_type(data, version=VERSION_2_0), repeat_safe=False)
 
     async def patch_event_type_v2(self, data: dict):
-        return await self._call(self._client.patch_event_type(data, version=VERSION_2_0))
+        return await self._call(lambda: self._client.patch_event_type(data, version=VERSION_2_0))
 
     async def list_subject_groups(self) -> List[dict]:
         return _results(await self._call(
-            self._client.get_subjectgroups(include_inactive=False, include_hidden=True, flat=True)
+            lambda: self._client.get_subjectgroups(include_inactive=False, include_hidden=True, flat=True)
         ))
 
     async def get_source_assignments(self, subject_ids: List[str]) -> List[dict]:
         params = {"subjects": ",".join(subject_ids), "page_size": ASSIGNMENTS_PAGE_SIZE}
         out = []
         while True:
-            data = await self._call(self._client._get("subjectsources", params=params))
+            data = await self._call(lambda: self._client._get("subjectsources", params=params))
             out.extend(_results(data))
             next_page = parse_qs(urlparse(data.get("next") or "").query).get("page") if isinstance(data, dict) else None
             if not next_page:
@@ -348,29 +389,29 @@ class ERSite:
             params = {**params, "page": next_page[0]}
 
     async def get_subject_sources(self, subject_id: str) -> List[dict]:
-        return _results(await self._call(self._client.get_subject_sources(subject_id)))
+        return _results(await self._call(lambda: self._client.get_subject_sources(subject_id)))
 
     async def get_observations(self, subject_id: str, start: datetime) -> List[dict]:
-        out = []
-        # A string: erclient turns a falsy 0 into filter=null, which includes points flagged as excluded.
-        observations = self._client.get_observations(
-            subject_id=subject_id, start=start, filter_flag="0", include_details=True
-        )
+        async def read_all() -> List[dict]:
+            # A string: erclient turns a falsy 0 into filter=null, which includes points flagged as excluded.
+            observations = self._client.get_observations(
+                subject_id=subject_id, start=start, filter_flag="0", include_details=True
+            )
+            return [observation async for observation in observations]
+
         try:
-            async for observation in observations:
-                out.append(observation)
+            return await with_retries(read_all)
         except _ER_CALL_FAILURES as e:
             raise self._translate(e) from e
-        return out
 
     async def list_feature_groups(self) -> List[dict]:
-        return _results(await self._call(self._client._get("spatialfeaturegroup", params={})))
+        return _results(await self._call(lambda: self._client._get("spatialfeaturegroup", params={})))
 
     async def get_feature_group(self, feature_group_id: str) -> dict:
-        return await self._call(self._client.get_feature_group(feature_group_id))
+        return await self._call(lambda: self._client.get_feature_group(feature_group_id))
 
     async def post_sharing_status(self, provider_key: str, payloads: List[dict]):
-        return await self._call(self._client._post(f"sensors/sharing/{provider_key}/status", payload=payloads))
+        return await self._call(lambda: self._client._post(f"sensors/sharing/{provider_key}/status", payload=payloads))
 
 
 def open_site(url: str, auth: AuthenticateConfig, role: str) -> ERSite:

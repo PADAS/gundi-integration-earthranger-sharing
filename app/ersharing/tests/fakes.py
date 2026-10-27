@@ -78,6 +78,8 @@ class FakeSite:
         self.calls: List[tuple] = []
         self.failures: Dict[str, Failure] = {}
         self.unreadable: set = set()
+        # When set, creates and edits stamp updated_at with it, as a real site stamps the write time.
+        self.write_time: Optional[str] = None
         self._ids = itertools.count(1)
 
     async def __aenter__(self):
@@ -131,13 +133,15 @@ class FakeSite:
         self._hit("post_event", event)
         stored = {"notes": [], "files": [], "is_contained_in": [], **copy.deepcopy(event)}
         stored.setdefault("id", self._new_id())
-        stored.setdefault("updated_at", "2026-10-15T00:00:00+00:00")
+        stored.setdefault("updated_at", self.write_time or "2026-10-15T00:00:00+00:00")
         self.events[stored["id"]] = stored
         return copy.deepcopy(stored)
 
     async def patch_event(self, event_id, data):
         self._hit("patch_event", event_id, data)
         self._event(event_id).update(copy.deepcopy(data))
+        if self.write_time:
+            self.events[event_id]["updated_at"] = self.write_time
         return copy.deepcopy(self.events[event_id])
 
     async def delete_event(self, event_id):

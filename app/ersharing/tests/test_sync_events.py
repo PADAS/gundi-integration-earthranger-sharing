@@ -36,6 +36,7 @@ def setup(*events, config=None, deadline=None):
     for event in events:
         source.events[event["id"]] = event
     dest = FakeSite()
+    dest.write_time = "2026-09-30T00:00:00+00:00"  # copies look older than the source edits below
     state = ShareState("i1", manager=InMemoryStateManager())
     settings = event_settings(SOURCE_URL, config or SyncEventsConfig.parse_obj({"start_from": "2026-09-01T00:00:00Z"}))
     run = EventsRun("i1", source, settings, None, state, deadline or time.monotonic() + 60)
@@ -87,7 +88,7 @@ async def test_adopts_v1_copy_without_duplicating_notes_or_files():
                        files=[{"id": "f1", "url": "u1", "filename": "a.jpg"}])
     source, dest, state, run = setup(event)
     source.files["u1"] = b"img"
-    dest.events["e1"] = {"id": "e1", "event_type": "sitea_wildlife_sighting", "updated_at": "2026-10-01T00:05:00Z",
+    dest.events["e1"] = {"id": "e1", "event_type": "sitea_wildlife_sighting", "updated_at": "2026-09-30T00:05:00Z",
                          "notes": [{"id": "dn1", "text": "hello"}], "files": [{"id": "df1", "filename": "a.jpg"}],
                          "is_contained_in": [], "event_details": provenance("e1", SOURCE_URL)}
     report = await sync(run, dest)
@@ -296,3 +297,26 @@ async def test_old_v1_copy_without_a_service_root_must_match_id_and_system(detai
 
 def test_source_failed_title_is_gone():
     assert not hasattr(sync_events, "SOURCE_FAILED")
+
+
+@pytest.mark.asyncio
+async def test_copy_edited_at_destination_after_the_source_change_is_left_alone():
+    source, dest, state, run = setup(make_event("e1", "2026-10-01T00:00:00Z"))
+    await sync(run, dest)
+    source.events["e1"].update(state="resolved", updated_at="2026-10-03T00:00:00Z")
+    dest.events["e1"].update(title="edited at Site B", updated_at="2026-10-04T00:00:00Z")
+    report = await sync(run, dest)
+    assert report.skipped == 1 and report.updated == 0
+    assert dest.events["e1"]["title"] == "edited at Site B"
+    source.events["e1"]["updated_at"] = "2026-10-05T00:00:00Z"  # a later source change wins again
+    report = await sync(run, dest)
+    assert report.updated == 1 and dest.events["e1"]["state"] == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_v1_copy_newer_than_the_source_change_is_not_rewritten():
+    source, dest, state, run = setup(make_event("e1", "2026-10-01T00:00:00Z"))
+    dest.events["e1"] = {"id": "e1", "event_type": "sitea_wildlife_sighting", "updated_at": "2026-10-01T00:05:00Z",
+                         "notes": [], "files": [], "is_contained_in": [], "event_details": provenance("e1", SOURCE_URL)}
+    report = await sync(run, dest)
+    assert report.skipped == 1 and not dest.calls_to("patch_event")

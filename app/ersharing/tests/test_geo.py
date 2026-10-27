@@ -46,3 +46,26 @@ async def test_missing_or_empty_feature_group_is_a_configuration_error():
     site.feature_groups["empty"] = {"id": "empty", "features": []}
     with pytest.raises(IntegrationConfigurationError, match="contain no shapes"):
         await load_area(site, ["empty"])
+
+
+ROAD = {"id": "fg2", "name": "Road", "features": [{"name": "Road", "features": [
+    {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[0, 0], [20, 20]]}}
+]}]}
+
+
+@pytest.mark.asyncio
+async def test_tracks_filter_uses_only_polygons():
+    site = source_with_square()
+    site.feature_groups["fg2"] = ROAD
+    area = await load_area(site, ["fg1", "fg2"], polygons_only=True)
+    assert area.contains_point(5, 5) and not area.contains_point(15, 15)
+    assert len(shapes_from_feature_group(ROAD, polygons_only=True)) == 0
+
+
+@pytest.mark.asyncio
+async def test_tracks_filter_without_polygons_is_a_configuration_error():
+    site = source_with_square()
+    site.feature_groups["fg2"] = ROAD
+    with pytest.raises(IntegrationConfigurationError, match="no areas"):
+        await load_area(site, ["fg2"], polygons_only=True)
+    assert await load_area(site, ["fg2"]) is not None  # the events filter still matches events against lines

@@ -15,7 +15,9 @@ from app.services.errors import IntegrationError
 from .clients import auth_config_of, halts_site, open_site, source_url_of
 from .destinations import Destination, resolve_destinations
 from .event_types import TYPE_NOT_READY, EventTypeSync
-from .events import clean_event, copied_from, event_label, incident_ids, is_copy_of, is_echo, is_newer, wanted
+from .events import (
+    clean_event, copied_from, dest_is_newer, event_label, incident_ids, is_copy_of, is_echo, is_newer, wanted,
+)
 from .geo import Area, load_area
 from .modes import EventSettings, event_settings
 from .notes_files import EPOCH, adopt_record, apply_files, apply_incidents, apply_notes, plan_files, plan_notes
@@ -27,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 BACKFILL = timedelta(days=10)
 RECONCILE_WINDOW = timedelta(days=30)
+# The destination's copy changed after this source change, so it is left alone (spec §7.3).
+DEST_IS_NEWER = object()
 
 
 @dataclass
@@ -106,6 +110,9 @@ async def _copy_event(run, destination, dest, types, event, report):
         return
     copy = clean_event(event, run.settings, dest_type, run.source.service_root)
     record = await _write_event(run, dest, event, copy, record, report)
+    if record is DEST_IS_NEWER:
+        report.skipped += 1
+        return
     if record is None:
         report.skipped += 1
         report.error(FOREIGN_COPY, item=event_label(event), level=LogLevel.WARNING)
@@ -125,28 +132,23 @@ async def _copy_event(run, destination, dest, types, event, report):
 
 
 async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Optional[EventRecord],
-                       report: DestinationReport) -> Optional[EventRecord]:
-    """Create or update the copy; None when the destination's event came from another site."""
-    body = {k: v for k, v in copy.items() if k != "id"}
-    if record is not None:
-        try:
-            await dest.patch_event(record.dest_event_id, body)
-            report.updated += 1
-            return record
-        except IntegrationError as e:
-            if e.status_code != 404:
-                raise
-            # Deleted at the destination: recreate it below.
-    existing = await dest.get_event(event["id"], with_notes_and_files=True)
-    if existing is not None:
-        if not is_copy_of(existing, event["id"], run.source.url, run.settings.source.value):
-            return None
-        await dest.patch_event(existing["id"], body)
-        report.updated += 1
-        return adopt_record(event, existing)
-    created = await dest.post_event(copy)
-    report.created += 1
-    return EventRecord(dest_event_id=str(created["id"]), updated_at=EPOCH)
+                       report: DestinationReport):
+    """Create or update the copy. None when the destination's event came from another
+    site; DEST_IS_NEWER when the copy changed after this source change."""
+    existing = await dest.get_event(record.dest_event_id if record else event["id"],
+                                    with_notes_and_files=record is None)
+    if existing is None:
+        # Never copied, or deleted at the destination: create it.
+        created = await dest.post_event(copy)
+        report.created += 1
+        return EventRecord(dest_event_id=str(created["id"]), updated_at=EPOCH)
+    if record is None and not is_copy_of(existing, event["id"], run.source.url, run.settings.source.value):
+        return None
+    if dest_is_newer(existing, event):
+        return DEST_IS_NEWER
+    await dest.patch_event(existing["id"], {k: v for k, v in copy.items() if k != "id"})
+    report.updated += 1
+    return record or adopt_record(event, existing)
 
 
 RECONCILE_EVERY_SECONDS = 24 * 60 * 60

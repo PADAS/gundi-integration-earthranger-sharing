@@ -79,6 +79,13 @@ def is_newer(event: dict, record: Optional[EventRecord]) -> bool:
     return record is None or parse_dt(event["updated_at"]) > record.updated_at
 
 
+def dest_is_newer(dest_copy: dict, event: dict) -> bool:
+    """The destination's copy changed after this version of the source event, for
+    example edited there. Updates go ahead only when the source is at least as new."""
+    updated = dest_copy.get("updated_at")
+    return bool(updated) and parse_dt(updated) > parse_dt(event["updated_at"])
+
+
 def incident_ids(event: dict) -> List[str]:
     return [str(c["related_event"]["id"]) for c in event.get("is_contained_in") or []
             if c.get("type") == "contains" and c.get("related_event")]

@@ -80,7 +80,7 @@ async def test_iter_events_asks_oldest_first_and_translates_mid_stream_failures(
     with pytest.raises(IntegrationConnectionError):
         async for page in site(client).iter_events_updated_since(datetime(2026, 1, 1, tzinfo=timezone.utc)):
             pages.append(page)
-    assert pages == [[{"id": "a"}]]
+    assert pages == [[{"id": "a"}]] * 3  # read again from the last page on each of the two retries
     assert captured["sort_by"] == "updated_at"
     assert json.loads(captured["filter"]) == {"update_date": {"lower": "2026-01-01T00:00:00+00:00"}}
 
@@ -305,3 +305,84 @@ async def test_download_connection_failure_halts_the_site():
     with pytest.raises(IntegrationConnectionError):
         async with streaming_site(refuse).download_file("https://siteb.pamdas.org/f", "a.txt", 100):
             pass
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_times_out_is_retried_within_the_run():
+    client = MagicMock()
+    client.get_me = AsyncMock(side_effect=[httpx.ReadTimeout("slow"), {"username": "svc"}])
+    assert await site(client).get_me() == {"username": "svc"}
+    assert client.get_me.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_server_error_is_retried_then_reported():
+    client = MagicMock()
+    client.patch_report = AsyncMock(side_effect=ERClientException("boom", status_code=500))
+    with pytest.raises(IntegrationBadResponseError):
+        await site(client).patch_event("e1", {})
+    assert client.patch_report.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_create_that_times_out_is_not_sent_twice():
+    client = MagicMock()
+    client.post_event_note = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+    with pytest.raises(IntegrationConnectionError):
+        await site(client).post_note("e1", "hello")
+    assert client.post_event_note.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_create_is_retried():
+    client = MagicMock()
+    client.post_event_note = AsyncMock(side_effect=[ERClientException("slow down", status_code=429), {"id": "n1"}])
+    assert await site(client).post_note("e1", "hello") == {"id": "n1"}
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_item_or_bad_credentials_are_not_retried():
+    client = MagicMock()
+    client.patch_report = AsyncMock(side_effect=ERClientBadRequest("x", status_code=400, response_body="bad"))
+    client.get_me = AsyncMock(side_effect=ERClientBadCredentials("bad", status_code=401))
+    with pytest.raises(IntegrationBadResponseError):
+        await site(client).patch_event("e1", {})
+    with pytest.raises(IntegrationAuthError):
+        await site(client).get_me()
+    assert client.patch_report.await_count == 1 and client.get_me.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reading_events_resumes_after_the_last_page_on_a_retry():
+    filters = []
+
+    async def get_events(**kwargs):
+        filters.append(json.loads(kwargs["filter"])["update_date"]["lower"])
+        if len(filters) == 1:
+            yield [{"id": "a", "updated_at": "2026-01-02T00:00:00+00:00"}]
+            raise httpx.ReadTimeout("slow")
+        yield [{"id": "b", "updated_at": "2026-01-03T00:00:00+00:00"}]
+
+    client = MagicMock()
+    client.get_events = get_events
+    pages = [page async for page in site(client).iter_events_updated_since(datetime(2026, 1, 1, tzinfo=timezone.utc))]
+    assert [p[0]["id"] for p in pages] == ["a", "b"]
+    assert filters == ["2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"]
+
+
+@pytest.mark.asyncio
+async def test_reading_observations_is_retried_from_the_start():
+    calls = []
+
+    async def get_observations(**kwargs):
+        calls.append(kwargs)
+        yield {"id": "o1"}
+        if len(calls) == 1:
+            raise httpx.ConnectError("lost")
+        yield {"id": "o2"}
+
+    client = MagicMock()
+    client.get_observations = get_observations
+    observations = await site(client, role="source").get_observations("s1", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert [o["id"] for o in observations] == ["o1", "o2"]
+    assert len(calls) == 2

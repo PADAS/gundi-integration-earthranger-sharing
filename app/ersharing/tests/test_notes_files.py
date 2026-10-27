@@ -32,6 +32,18 @@ def test_plan_files_adds_new_and_deletes_removed():
     assert sorted(plan.delete) == [("f8", ""), ("f9", "df9")]
 
 
+def test_new_notes_and_files_are_added_oldest_first():
+    notes = [{"id": "n2", "text": "later", "created_at": "2026-10-02T00:00:00Z"},
+             {"id": "n1", "text": "first", "created_at": "2026-10-01T00:00:00Z"}]
+    files = [{"id": "f2", "created_at": "2026-10-02T00:00:00Z"}, {"id": "f1", "created_at": "2026-10-01T00:00:00Z"}]
+    assert [n["id"] for n in plan_notes(notes, {}).add] == ["n1", "n2"]
+    assert [f["id"] for f in plan_files(files, {}).add] == ["f1", "f2"]
+
+
+def test_without_creation_times_the_source_list_is_reversed_as_v1_did():
+    assert [n["id"] for n in plan_notes([{"id": "n2", "text": "b"}, {"id": "n1", "text": "a"}], {}).add] == ["n1", "n2"]
+
+
 def test_adopt_record_matches_existing_notes_and_files_once():
     src = make_event("e1", "2026-10-01T00:00:00Z",
                      notes=[{"id": "n1", "text": "hello"}, {"id": "n2", "text": "hello"}],

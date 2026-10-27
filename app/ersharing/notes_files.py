@@ -12,6 +12,7 @@ from .clients import halts_site
 from .events import incident_ids
 from .reporting import DestinationReport
 from .state import EventRecord, NoteRecord
+from .timeutil import parse_dt
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -36,6 +37,14 @@ class FilesPlan:
     delete: List[Tuple[str, str]] = field(default_factory=list)   # (source file id, dest file id or "")
 
 
+def oldest_first(items: List[dict]) -> List[dict]:
+    """New notes and files are added oldest first, as v1 did, so the copy lists them in
+    the source's order. Sorted by created_at; without it, v1's reversal of the source list."""
+    if all(item.get("created_at") for item in items):
+        return sorted(items, key=lambda item: parse_dt(item["created_at"]))
+    return list(reversed(items))
+
+
 def plan_notes(src_notes, recorded: Dict[str, NoteRecord]) -> NotesPlan:
     plan = NotesPlan()
     current = {str(n["id"]): n for n in src_notes or [] if n.get("text")}
@@ -45,6 +54,7 @@ def plan_notes(src_notes, recorded: Dict[str, NoteRecord]) -> NotesPlan:
             plan.add.append(note)
         elif rec.digest != note_digest(note["text"]):
             plan.update.append((note, rec.dest_id))
+    plan.add = oldest_first(plan.add)
     plan.delete = [(src_id, rec.dest_id) for src_id, rec in recorded.items() if src_id not in current]
     return plan
 
@@ -52,7 +62,7 @@ def plan_notes(src_notes, recorded: Dict[str, NoteRecord]) -> NotesPlan:
 def plan_files(src_files, recorded: Dict[str, str]) -> FilesPlan:
     current = {str(f["id"]): f for f in src_files or []}
     return FilesPlan(
-        add=[f for src_id, f in current.items() if src_id not in recorded],
+        add=oldest_first([f for src_id, f in current.items() if src_id not in recorded]),
         delete=[(src_id, dest_id) for src_id, dest_id in recorded.items() if src_id not in current],
     )
 
