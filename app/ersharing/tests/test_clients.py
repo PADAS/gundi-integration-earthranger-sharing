@@ -66,12 +66,12 @@ async def test_network_failure_is_a_halting_connection_error():
 
 
 @pytest.mark.asyncio
-async def test_iter_events_asks_oldest_first_and_translates_mid_stream_failures():
-    captured = {}
+async def test_iter_events_asks_oldest_first_by_page_number_and_translates_failures():
+    calls = []
 
     async def get_events(**kwargs):
-        captured.update(kwargs)
-        yield [{"id": "a"}]
+        calls.append(kwargs)
+        yield {"id": "a"}
         raise ERClientException("down")
 
     client = MagicMock()
@@ -80,9 +80,11 @@ async def test_iter_events_asks_oldest_first_and_translates_mid_stream_failures(
     with pytest.raises(IntegrationConnectionError):
         async for page in site(client).iter_events_updated_since(datetime(2026, 1, 1, tzinfo=timezone.utc)):
             pages.append(page)
-    assert pages == [[{"id": "a"}]] * 3  # read again from the last page on each of the two retries
-    assert captured["sort_by"] == "updated_at"
-    assert json.loads(captured["filter"]) == {"update_date": {"lower": "2026-01-01T00:00:00+00:00"}}
+    assert pages == []  # a page is handed out only once it was read in full
+    assert len(calls) == 3  # tried again twice
+    # ER refuses cursor paging unless sorted by -created_at, so pages are asked for by number.
+    assert calls[0]["sort_by"] == "updated_at" and calls[0]["page"] == 1
+    assert json.loads(calls[0]["filter"]) == {"update_date": {"lower": "2026-01-01T00:00:00+00:00"}}
 
 
 @pytest.mark.asyncio
@@ -353,36 +355,63 @@ async def test_a_rejected_item_or_bad_credentials_are_not_retried():
 
 
 @pytest.mark.asyncio
-async def test_reading_events_resumes_after_the_last_page_on_a_retry():
-    filters = []
+def events_by_request(pages, failures=0):
+    """A fake get_events serving the given pages in turn, after failing `failures` times."""
+    requests = []
 
     async def get_events(**kwargs):
-        filters.append(json.loads(kwargs["filter"])["update_date"]["lower"])
-        if len(filters) == 1:
-            yield [{"id": "a", "updated_at": "2026-01-02T00:00:00+00:00"}]
+        requests.append((json.loads(kwargs["filter"])["update_date"]["lower"], kwargs["page"]))
+        if len(requests) <= failures:
             raise httpx.ReadTimeout("slow")
-        yield [{"id": "b", "updated_at": "2026-01-03T00:00:00+00:00"}]
+        for event in pages[len(requests) - failures - 1]:
+            yield event
 
-    client = MagicMock()
-    client.get_events = get_events
-    pages = [page async for page in site(client).iter_events_updated_since(datetime(2026, 1, 1, tzinfo=timezone.utc))]
-    assert [p[0]["id"] for p in pages] == ["a", "b"]
-    assert filters == ["2026-01-01T00:00:00+00:00", "2026-01-02T00:00:00+00:00"]
+    return get_events, requests
 
 
 @pytest.mark.asyncio
-async def test_reading_observations_is_retried_from_the_start():
-    calls = []
-
-    async def get_observations(**kwargs):
-        calls.append(kwargs)
-        yield {"id": "o1"}
-        if len(calls) == 1:
-            raise httpx.ConnectError("lost")
-        yield {"id": "o2"}
-
+async def test_reading_events_starts_each_page_from_the_newest_change_seen():
+    a = {"id": "a", "updated_at": "2026-01-02T00:00:00+00:00"}
+    b = {"id": "b", "updated_at": "2026-01-03T00:00:00+00:00"}
+    c = {"id": "c", "updated_at": "2026-01-04T00:00:00+00:00"}
     client = MagicMock()
-    client.get_observations = get_observations
+    client.get_events, requests = events_by_request([[a, b], [b, c], [c]], failures=1)
+    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pages = [page async for page in site(client).iter_events_updated_since(since, page_size=2)]
+    assert pages == [[a, b], [b, c], [c]]  # repeats at the newest time are skipped downstream
+    assert requests == [
+        ("2026-01-01T00:00:00+00:00", 1),  # timed out, tried again
+        ("2026-01-01T00:00:00+00:00", 1),
+        ("2026-01-03T00:00:00+00:00", 1),
+        ("2026-01-04T00:00:00+00:00", 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_full_page_changed_at_one_time_moves_on_to_the_next_page_number():
+    a = {"id": "a", "updated_at": "2026-01-02T00:00:00+00:00"}
+    b = {"id": "b", "updated_at": "2026-01-02T00:00:00+00:00"}
+    c = {"id": "c", "updated_at": "2026-01-02T00:00:00+00:00"}
+    client = MagicMock()
+    client.get_events, requests = events_by_request([[a, b], [a, b], [c]])
+    since = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    pages = [page async for page in site(client).iter_events_updated_since(since, page_size=2)]
+    assert pages == [[a, b], [a, b], [c]]
+    assert [page_number for _, page_number in requests] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_reading_observations_follows_the_cursor_decoded():
+    client = MagicMock()
+    client._get = AsyncMock(side_effect=[
+        httpx.ConnectError("lost"),
+        {"results": [{"id": "o1"}],
+         "next": "https://siteb.pamdas.org/api/v1.0/observations?use_cursor=true&cursor=cD0yMDI2KzA4%3D"},
+        {"results": [{"id": "o2"}], "next": None},
+    ])
     observations = await site(client, role="source").get_observations("s1", datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert [o["id"] for o in observations] == ["o1", "o2"]
-    assert len(calls) == 2
+    first, retried, second = (c.kwargs["params"] for c in client._get.await_args_list)
+    assert "cursor" not in first and retried == first  # the failed page is read again
+    # Decoded, so httpx encodes it once. erclient passed "%3D" through, sent it as "%253D", and ER refused it.
+    assert second["cursor"] == "cD0yMDI2KzA4="

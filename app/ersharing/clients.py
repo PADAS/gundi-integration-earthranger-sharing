@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
 ASSIGNMENTS_PAGE_SIZE = 1000
+OBSERVATIONS_PAGE_SIZE = 100
 
 
 def build_er_client(url: str, auth: AuthenticateConfig) -> AsyncERClient:
@@ -225,32 +226,35 @@ class ERSite:
     async def iter_events_updated_since(
         self, since: datetime, *, page_size: int = 100, with_notes_and_files: bool = True
     ) -> AsyncIterator[List[dict]]:
-        waits = iter(RETRY_WAITS)
+        # EarthRanger only pages by cursor when sorting newest-created first, so each page is
+        # asked for by number, starting again from the newest change seen so far. Repeats of
+        # events at that same time are skipped downstream. A full page that all changed at
+        # that same time moves on to the next page number instead.
+        page_number = 1
         while True:
-            events = self._client.get_events(
-                filter=json.dumps({"update_date": {"lower": since.isoformat()}}),
-                sort_by="updated_at",
-                include_details=True,
-                include_notes=with_notes_and_files,
-                include_files=with_notes_and_files,
-                include_updates=False,
-                include_related_events=False,
-                page_size=page_size,
-                batch_size=page_size,
-            )
-            try:
-                async for page in events:
-                    newest = max([since, *(parse_dt(e["updated_at"]) for e in page if e.get("updated_at"))])
-                    yield page
-                    # A retry reads again from the last page handed out; repeats are skipped downstream.
-                    since = newest
+            async def read_page(since=since, page_number=page_number) -> List[dict]:
+                return [event async for event in self._client.get_events(
+                    filter=json.dumps({"update_date": {"lower": since.isoformat()}}),
+                    sort_by="updated_at",
+                    include_details=True,
+                    include_notes=with_notes_and_files,
+                    include_files=with_notes_and_files,
+                    include_updates=False,
+                    include_related_events=False,
+                    page=page_number,
+                    page_size=page_size,
+                )]
+
+            page = await self._call(read_page)
+            if page:
+                yield page
+            if len(page) < page_size:
                 return
-            except _ER_CALL_FAILURES as e:
-                wait = next(waits, None)
-                if wait is None or not is_retryable(e):
-                    raise self._translate(e) from e
-                logger.info("Reading events failed (%s); trying again in %s s", type(e).__name__, wait)
-                await asyncio.sleep(wait)
+            newest = max((parse_dt(e["updated_at"]) for e in page if e.get("updated_at")), default=since)
+            if newest > since:
+                since, page_number = newest, 1
+            else:
+                page_number += 1
 
     async def get_event(self, event_id: str, *, with_notes_and_files: bool = False) -> Optional[dict]:
         return await self._call(
@@ -392,17 +396,21 @@ class ERSite:
         return _results(await self._call(lambda: self._client.get_subject_sources(subject_id)))
 
     async def get_observations(self, subject_id: str, start: datetime) -> List[dict]:
-        async def read_all() -> List[dict]:
-            # A string: erclient turns a falsy 0 into filter=null, which includes points flagged as excluded.
-            observations = self._client.get_observations(
-                subject_id=subject_id, start=start, filter_flag="0", include_details=True
-            )
-            return [observation async for observation in observations]
-
-        try:
-            return await with_retries(read_all)
-        except _ER_CALL_FAILURES as e:
-            raise self._translate(e) from e
+        # Paged here rather than through erclient, which copies the next page's cursor
+        # without decoding it, so a cursor with escaped characters reaches ER encoded twice
+        # and is refused as "Invalid cursor". filter=0 leaves out points flagged as excluded.
+        params = {
+            "subject_id": subject_id, "since": start.isoformat(), "filter": "0",
+            "include_details": "true", "page_size": OBSERVATIONS_PAGE_SIZE, "use_cursor": "true",
+        }
+        out = []
+        while True:
+            data = await self._call(lambda: self._client._get("observations", params=params))
+            out.extend(_results(data))
+            cursor = parse_qs(urlparse(data.get("next") or "").query).get("cursor") if isinstance(data, dict) else None
+            if not cursor:
+                return out
+            params = {**params, "cursor": cursor[0]}
 
     async def list_feature_groups(self) -> List[dict]:
         return _results(await self._call(lambda: self._client._get("spatialfeaturegroup", params={})))
