@@ -135,6 +135,8 @@ class ObservationsCompatibility(BaseModel):
 
 
 class SyncEventsConfig(PullActionConfiguration):
+    """Shares this site's events with every destination EarthRanger site. Choose which event types and areas to share."""
+
     run_on_schedule: bool = Field(
         True, title="Share events", description="Copy new and changed events to every destination."
     )
@@ -168,6 +170,8 @@ class SyncEventsConfig(PullActionConfiguration):
 
 
 class SyncObservationsConfig(PullActionConfiguration):
+    """Shares this site's subjects and their tracks with every destination EarthRanger site. Choose which subject groups and areas to share."""
+
     run_on_schedule: bool = Field(
         True, title="Share subject tracks", description="Copy new track points to every destination."
     )

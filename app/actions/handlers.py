@@ -24,7 +24,7 @@ async def action_sync_events(integration: Integration, action_config: SyncEvents
     return await run_sync_events(integration, action_config)
 
 
-@action_title("Share Observations")
+@action_title("Share Subjects")
 @crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_sync_observations(integration: Integration, action_config: SyncObservationsConfig):

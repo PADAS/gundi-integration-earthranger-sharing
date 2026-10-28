@@ -7,6 +7,7 @@ import pytest
 from app.actions import action_handlers, handlers
 from app.actions.configurations import (
     AuthenticateConfig, ListEventTypesQuery, ListFeatureGroupsQuery, ListSubjectGroupsQuery,
+    SyncEventsConfig, SyncObservationsConfig,
 )
 from app.ersharing import clients
 from app.ersharing.tests.fakes import FakeSite
@@ -29,6 +30,14 @@ def test_all_actions_are_registered():
     assert sorted(action_handlers) == [
         "auth", "list_event_types", "list_feature_groups", "list_subject_groups", "sync_events", "sync_observations",
     ]
+
+
+def test_sharing_actions_have_portal_names_and_descriptions():
+    assert handlers.action_sync_events.action_title == "Share Events"
+    assert handlers.action_sync_observations.action_title == "Share Subjects"
+    # The portal shows the config's description under the section's title.
+    assert SyncEventsConfig.schema()["description"].startswith("Shares this site's events")
+    assert SyncObservationsConfig.schema()["description"].startswith("Shares this site's subjects")
 
 
 @pytest.mark.asyncio
