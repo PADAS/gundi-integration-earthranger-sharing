@@ -16,7 +16,8 @@ from .clients import auth_config_of, halts_site, open_site, source_url_of
 from .destinations import Destination, resolve_destinations
 from .event_types import TYPE_NOT_READY, EventTypeSync
 from .events import (
-    clean_event, copied_from, dest_is_newer, event_label, incident_ids, is_copy_of, is_echo, is_newer, wanted,
+    clean_event, copied_from, dest_is_newer, event_label, incident_ids, is_copy_of, is_echo, is_newer, member_ids,
+    wanted,
 )
 from .geo import Area, load_area
 from .modes import EventSettings, event_settings
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 BACKFILL = timedelta(days=10)
 RECONCILE_WINDOW = timedelta(days=30)
+INCIDENT_LINKS_WINDOW = timedelta(days=30)
 # The destination's copy changed after this source change, so it is left alone (spec §7.3).
 DEST_IS_NEWER = object()
 
@@ -69,6 +71,34 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
             await run.state.set_marker(EVENTS_ACTION, marker_key(destination.id),
                                        Marker(since=since, advanced_at=now))
         report.marker = since
+    await sync_incident_links(run, destination, dest, report)
+
+
+async def sync_incident_links(run: EventsRun, destination: Destination, dest, report: DestinationReport) -> None:
+    """Adding an event to an incident, or removing it, at the source changes neither event's
+    updated_at, so the events held by recent incidents are compared on every run (spec §7.5)."""
+    async for page in run.source.iter_events_updated_since(utcnow() - INCIDENT_LINKS_WINDOW,
+                                                           with_notes_and_files=False, incidents_only=True):
+        for incident in page:
+            if run.out_of_time():
+                report.timed_out = True
+                return
+            incident_id = incident["id"]
+            incident_record = await run.state.get_event_record(destination.id, incident_id)
+            if incident_record is None:
+                continue  # the incident itself isn't copied
+            members = member_ids(incident)
+            for event_id in dict.fromkeys([*members, *incident_record.members]):
+                record = await run.state.get_event_record(destination.id, event_id)
+                if record is None or (event_id in members) == (incident_id in record.incidents):
+                    continue
+                wanted_ids = ([*record.incidents, incident_id] if event_id in members
+                              else [i for i in record.incidents if i != incident_id])
+                await apply_incidents(dest, record.dest_event_id, wanted_ids, record, report)
+                await run.state.set_event_record(destination.id, event_id, record)
+            if incident_record.members != members:
+                incident_record.members = members
+                await run.state.set_event_record(destination.id, incident_id, incident_record)
 
 
 FOREIGN_COPY = "Some events weren't copied because the destination already has them from another site."

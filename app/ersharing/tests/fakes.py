@@ -117,12 +117,20 @@ class FakeSite:
         self._hit("can_read", path, params)
         return path not in self.unreadable
 
-    async def iter_events_updated_since(self, since, *, page_size=100, with_notes_and_files=True):
+    async def iter_events_updated_since(self, since, *, page_size=100, with_notes_and_files=True,
+                                        incidents_only=False):
         self._hit("iter_events_updated_since", since)
         matching = sorted(
-            (e for e in self.events.values() if parse_dt(e["updated_at"]) >= since),
+            (e for e in self.events.values() if parse_dt(e["updated_at"]) >= since
+             and (not incidents_only or e.get("is_collection"))),
             key=lambda e: parse_dt(e["updated_at"]),
         )
+        if incidents_only:
+            # Like ER, an incident lists the events it holds; linking changes neither updated_at.
+            matching = [{**incident, "contains": [
+                {"type": "contains", "related_event": {"id": e["id"]}} for e in self.events.values()
+                if any(c["related_event"]["id"] == incident["id"] for c in e.get("is_contained_in") or [])
+            ]} for incident in matching]
         for i in range(0, len(matching), page_size):
             yield copy.deepcopy(matching[i:i + page_size])
 

@@ -224,12 +224,15 @@ class ERSite:
         return True
 
     async def iter_events_updated_since(
-        self, since: datetime, *, page_size: int = 100, with_notes_and_files: bool = True
+        self, since: datetime, *, page_size: int = 100, with_notes_and_files: bool = True,
+        incidents_only: bool = False,
     ) -> AsyncIterator[List[dict]]:
         # EarthRanger only pages by cursor when sorting newest-created first, so each page is
         # asked for by number, starting again from the newest change seen so far. Repeats of
         # events at that same time are skipped downstream. A full page that all changed at
         # that same time moves on to the next page number instead.
+        # incidents_only lists incidents with the events they hold.
+        extra = {"is_collection": "true"} if incidents_only else {}
         page_number = 1
         while True:
             async def read_page(since=since, page_number=page_number) -> List[dict]:
@@ -240,9 +243,10 @@ class ERSite:
                     include_notes=with_notes_and_files,
                     include_files=with_notes_and_files,
                     include_updates=False,
-                    include_related_events=False,
+                    include_related_events=incidents_only,
                     page=page_number,
                     page_size=page_size,
+                    **extra,
                 )]
 
             page = await self._call(read_page)

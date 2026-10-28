@@ -91,5 +91,10 @@ def incident_ids(event: dict) -> List[str]:
             if c.get("type") == "contains" and c.get("related_event")]
 
 
+def member_ids(incident: dict) -> List[str]:
+    return [str(c["related_event"]["id"]) for c in incident.get("contains") or []
+            if c.get("type") == "contains" and c.get("related_event")]
+
+
 def event_label(event: dict) -> str:
     return f"#{event.get('serial_number')} ({event.get('id')})"

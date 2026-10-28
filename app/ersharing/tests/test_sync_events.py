@@ -179,6 +179,58 @@ async def test_notes_copied_before_a_failure_are_not_posted_again():
     assert [n["text"] for n in dest.events["e1"]["notes"]] == ["a"]
 
 
+def link(event, incident_id):
+    event["is_contained_in"].append({"type": "contains", "related_event": {"id": incident_id}})
+
+
+def dest_incidents(dest, event_id):
+    return [c["related_event"]["id"] for c in dest.events[event_id]["is_contained_in"]]
+
+
+@pytest.fixture
+def incidents_window_now(monkeypatch):
+    monkeypatch.setattr(sync_events, "utcnow", lambda: parse_dt("2026-10-05T00:00:00Z"))
+
+
+@pytest.mark.asyncio
+async def test_links_changed_at_the_source_reach_the_copy_though_neither_event_changed(incidents_window_now):
+    source, dest, state, run = setup(make_event("e1", "2026-10-01T00:00:00Z"),
+                                     make_event("inc", "2026-10-02T00:00:00Z", is_collection=True))
+    await sync(run, dest)
+    link(source.events["e1"], "inc")  # ER doesn't change updated_at on either event
+    report = await sync(run, dest)
+    assert dest_incidents(dest, "e1") == ["inc"] and report.updated == 0
+    assert (await state.get_event_record("d1", "inc")).members == ["e1"]
+    source.events["e1"]["is_contained_in"] = []
+    await sync(run, dest)
+    assert dest_incidents(dest, "e1") == []
+    assert (await state.get_event_record("d1", "e1")).incidents == []
+    await sync(run, dest)
+    assert len(dest.calls_to("add_to_incident")) == 1 and len(dest.calls_to("remove_from_incident")) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_copied_before_its_incident_is_linked_in_the_same_run(incidents_window_now):
+    event = make_event("e1", "2026-10-01T00:00:00Z")
+    link(event, "inc")
+    source, dest, state, run = setup(event, make_event("inc", "2026-10-02T00:00:00Z", is_collection=True))
+    await sync(run, dest)
+    assert dest_incidents(dest, "e1") == ["inc"]
+
+
+@pytest.mark.asyncio
+async def test_incidents_that_were_not_copied_are_left_alone(incidents_window_now):
+    config = SyncEventsConfig.parse_obj({"start_from": "2026-09-01T00:00:00Z", "event_types": ["wildlife_sighting"]})
+    event = make_event("e1", "2026-10-01T00:00:00Z")
+    link(event, "inc")
+    source, dest, state, run = setup(event, make_event("inc", "2026-10-02T00:00:00Z", event_type="incident_collection",
+                                                       is_collection=True), config=config)
+    report = await sync(run, dest)
+    assert "inc" not in dest.events and dest_incidents(dest, "e1") == []
+    assert len(dest.calls_to("add_to_incident")) == 1  # only the event's own attempt, reported as a warning
+    assert report.errors
+
+
 @pytest.mark.asyncio
 async def test_failed_event_stays_due_after_a_partial_copy():
     source, dest, state, run = setup(make_event("e1", "2026-10-01T00:00:00Z", notes=[{"id": "n1", "text": "a"}],
