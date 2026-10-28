@@ -4,7 +4,13 @@ from dataclasses import replace
 import pytest
 
 from app.actions.configurations import SyncEventsConfig
-from app.ersharing.event_types import PROVENANCE_SECTION_ID, EventTypeSync, clean_event_type, has_provenance_fields
+from app.ersharing.event_types import (
+    PROVENANCE_SECTION_ID,
+    EventTypeSync,
+    add_provenance_fields_to_v2_schema,
+    clean_event_type,
+    has_provenance_fields,
+)
 from app.ersharing.modes import event_settings
 from app.ersharing.tests.fakes import FakeSite
 from app.services.errors import IntegrationBadResponseError, IntegrationConnectionError
@@ -88,7 +94,53 @@ async def test_unknown_source_type_and_rejected_type_are_failures_not_exceptions
     assert await sync.ensure("wildlife_sighting") is None
     assert await sync.ensure("no_such_type") is None
     assert "rejected" in sync.failures["wildlife_sighting"]
-    assert "not found at the source" in sync.failures["no_such_type"]
+    assert "sitea_no_such_type is missing at the destination" in sync.failures["no_such_type"]
+
+
+def v2_dest_type(value, **schema_properties):
+    return {"value": value, "display": "Sitea-Patrol Log", "category": {"value": "sitea_monitoring"},
+            "schema": {"json": {"properties": dict(schema_properties)}, "ui": {"fields": {}, "sections": {}, "order": []}}}
+
+
+@pytest.mark.asyncio
+async def test_v1_source_type_uses_the_destinations_v2_type_and_adds_provenance():
+    source, dest = sites()  # patrol_log isn't in the source's v2 list: a v1 type there
+    dest.event_types["sitea_patrol_log"] = v2_dest_type("sitea_patrol_log", notes={"type": "string"})
+    ready = await EventTypeSync(source, dest, SETTINGS).ensure("patrol_log")
+    assert ready["display"] == "Sitea-Patrol Log"
+    stored = dest.event_types["sitea_patrol_log"]
+    assert has_provenance_fields({"schema": stored["schema"]}) and "notes" in json.loads(stored["schema"])["json"]["properties"]
+    assert stored["display"] == "Sitea-Patrol Log"  # only the schema was changed
+    assert not dest.calls_to("post_event_type_v2") and not dest.calls_to("post_event_category")
+
+
+@pytest.mark.asyncio
+async def test_v1_source_type_with_provenance_already_declared_is_not_patched():
+    source, dest = sites()
+    dest_type = v2_dest_type("sitea_patrol_log")
+    add_provenance_fields_to_v2_schema(dest_type["schema"])
+    dest.event_types["sitea_patrol_log"] = dest_type
+    assert await EventTypeSync(source, dest, SETTINGS).ensure("patrol_log") is not None
+    assert not dest.calls_to("patch_event_type_v2")
+
+
+@pytest.mark.asyncio
+async def test_v1_source_type_needs_provenance_when_updates_are_off():
+    source, dest = sites()
+    dest.event_types["sitea_patrol_log"] = v2_dest_type("sitea_patrol_log")
+    sync = EventTypeSync(source, dest, replace(SETTINGS, update_schema=False))
+    assert await sync.ensure("patrol_log") is None
+    assert "lacks the EarthRanger Sharing provenance fields" in sync.failures["patrol_log"]
+    assert not dest.calls_to("patch_event_type_v2")
+
+
+@pytest.mark.asyncio
+async def test_v1_source_type_uses_the_destinations_v1_type_as_it_is():
+    source, dest = sites()
+    dest.event_types_v1["sitea_patrol_log"] = {"value": "sitea_patrol_log", "display": "Sitea-Patrol Log"}
+    sync = EventTypeSync(source, dest, SETTINGS)
+    assert (await sync.ensure("patrol_log"))["display"] == "Sitea-Patrol Log"
+    assert not dest.calls_to("patch_event_type_v2") and not dest.calls_to("post_event_type_v2")
 
 
 @pytest.mark.asyncio

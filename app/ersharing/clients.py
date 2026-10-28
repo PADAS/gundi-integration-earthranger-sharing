@@ -365,6 +365,10 @@ class ERSite:
     async def list_event_types_v2(self) -> List[dict]:
         return _results(await self._call(lambda: self._client.get_event_types(include_schema=True, version=VERSION_2_0)))
 
+    async def list_event_types_v1(self) -> List[dict]:
+        """The site's v1 event types. ER's v1 list leaves out types already on schema v2."""
+        return _results(await self._call(lambda: self._client.get_event_types(include_inactive=True)))
+
     async def get_event_type_v2(self, value: str) -> Optional[dict]:
         return await self._call(
             lambda: self._client.get_event_type(value, version=VERSION_2_0, include_schema=True), none_on_404=True

@@ -133,6 +133,7 @@ class EventTypeSync:
         self._source_types: Optional[Dict[str, dict]] = None
         self._source_categories: Optional[Dict[str, dict]] = None
         self._dest_categories: Optional[Dict[str, dict]] = None
+        self._dest_v1_types: Optional[Dict[str, dict]] = None
         self._categories_done: Set[str] = set()
 
     async def ensure(self, source_value: str) -> Optional[dict]:
@@ -155,7 +156,7 @@ class EventTypeSync:
             self._source_types = {t["value"]: t for t in await self._source.list_event_types_v2()}
         src = self._source_types.get(source_value)
         if src is None:
-            raise IntegrationConfigurationError("not found at the source (is it a v1 event type?)")
+            return await self._ensure_for_v1_source(source_value)
         wanted = clean_event_type(src, self._s)
         existing = await self._dest.get_event_type_v2(wanted["value"])
         if not self._s.update_schema:
@@ -171,6 +172,32 @@ class EventTypeSync:
         elif not same_event_type(wanted, existing):
             await self._dest.patch_event_type_v2(wanted)
         return wanted
+
+    async def _ensure_for_v1_source(self, source_value: str) -> dict:
+        """v1 event types can't be created any more, so events of a v1 source type are
+        copied only into a type the destination already has, as v1 sharing did. A v2
+        destination type gets the provenance fields; a v1 one is used as it is."""
+        dest_value = dest_event_type_value(source_value, self._s)
+        existing = await self._dest.get_event_type_v2(dest_value)
+        if existing is not None:
+            if has_provenance_fields(existing):
+                return existing
+            if not self._s.update_schema:
+                raise IntegrationConfigurationError(
+                    "is a v1 event type at the source, and the destination's type lacks the EarthRanger "
+                    "Sharing provenance fields while updating destination event types is turned off"
+                )
+            schema = add_provenance_fields_to_v2_schema(copy.deepcopy(_as_schema(existing.get("schema")) or {}))
+            await self._dest.patch_event_type_v2({"value": dest_value, "schema": json.dumps(schema, indent=4)})
+            return {**existing, "schema": schema}
+        if self._dest_v1_types is None:
+            self._dest_v1_types = {t["value"]: t for t in await self._dest.list_event_types_v1()}
+        if dest_value in self._dest_v1_types:
+            return self._dest_v1_types[dest_value]
+        raise IntegrationConfigurationError(
+            f"is a v1 event type at the source and {dest_value} is missing at the destination. "
+            "v1 event types can't be created, so create it at the destination first"
+        )
 
     async def _ensure_category(self, src_value: str):
         dest_value = dest_category_value(src_value, self._s)

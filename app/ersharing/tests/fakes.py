@@ -65,6 +65,7 @@ class FakeSite:
         self.me = {"username": "svc", "is_active": True, "permissions": {}}
         self.events: Dict[str, dict] = {}
         self.event_types: Dict[str, dict] = {}
+        self.event_types_v1: Dict[str, dict] = {}  # ER's v2 API can't see these
         self.categories: Dict[str, dict] = {}
         self.subject_groups: List[dict] = []
         self.assignments: List[dict] = []
@@ -219,6 +220,10 @@ class FakeSite:
         self._hit("list_event_types_v2")
         return copy.deepcopy(list(self.event_types.values()))
 
+    async def list_event_types_v1(self):
+        self._hit("list_event_types_v1")
+        return copy.deepcopy(list(self.event_types_v1.values()))
+
     async def get_event_type_v2(self, value):
         self._hit("get_event_type_v2", value)
         return copy.deepcopy(self.event_types.get(value))
@@ -229,7 +234,7 @@ class FakeSite:
 
     async def patch_event_type_v2(self, data):
         self._hit("patch_event_type_v2", data)
-        self.event_types[data["value"]] = copy.deepcopy(data)
+        self.event_types[data["value"]] = {**self.event_types.get(data["value"], {}), **copy.deepcopy(data)}
 
     async def list_subject_groups(self):
         self._hit("list_subject_groups")

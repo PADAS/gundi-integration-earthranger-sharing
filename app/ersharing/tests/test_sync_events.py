@@ -133,7 +133,7 @@ async def test_event_type_failure_only_affects_that_type():
     assert report.failed == 2 and report.created == 1
     group = report.errors[TYPE_NOT_READY]
     assert list(report.errors) == [TYPE_NOT_READY] and group.count == 2
-    assert "unknown_v1_type" in group.examples[0] and "bad schema" in group.examples[1]
+    assert "unknown_v1_type is missing at the destination" in group.examples[0] and "bad schema" in group.examples[1]
 
 
 @pytest.mark.asyncio
