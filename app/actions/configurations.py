@@ -73,6 +73,14 @@ def reference(action: str) -> dict:
     return {"action": action, "target": "self", "params": {}, "allow_free_text": True}
 
 
+def share_preview(action: str, kind: str, selection_fields: Sequence[str]) -> dict:
+    """gundi:share_preview annotation: before saving this action, the portal shows
+    what will be shared, read from the reference action `action` with the
+    section's current values. `kind` is "events" or "subjects"; `selection_fields`
+    are the fields the user picks in (all empty means share everything)."""
+    return {"action": action, "kind": kind, "selection_fields": list(selection_fields)}
+
+
 RAW_VIEW_TITLE = "Legacy View"
 
 # v1 er2er state key -> form field path ("a.b" is a nested field). The portal's
@@ -166,6 +174,7 @@ class SyncEventsConfig(PullActionConfiguration):
         base["area_feature_groups"] = {"items": {"gundi:reference": reference("list_feature_groups")}}
         base["start_from"] = {"ui:widget": "hidden"}
         base["gundi:raw_view"] = raw_view(EVENTS_V1_KEYS, drop=EVENTS_V1_DROP, mask=V1_MASK)
+        base["gundi:share_preview"] = share_preview("preview_events_share", "events", ["event_types"])
         return base
 
 
@@ -209,6 +218,7 @@ class SyncObservationsConfig(PullActionConfiguration):
         base["start_from"] = {"ui:widget": "hidden"}
         base["gundi:raw_view"] = raw_view(OBSERVATIONS_V1_KEYS, drop=OBSERVATIONS_V1_DROP, mask=V1_MASK,
                                            unwrap=OBSERVATIONS_V1_UNWRAP)
+        base["gundi:share_preview"] = share_preview("preview_subjects_share", "subjects", ["subject_groups"])
         return base
 
 
