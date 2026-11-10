@@ -236,11 +236,13 @@ class ListFeatureGroupsQuery(ReferenceActionConfiguration):
 
 class PreviewEventsShareQuery(ReferenceActionConfiguration):
     """What Share Events would share with these values: the portal sends the
-    section's whole form; only the event type selection matters here."""
+    section's whole form; the event type selection and the area filter are read."""
     event_types: List[str] = Field(default_factory=list)
+    area_feature_groups: List[str] = Field(default_factory=list)
 
 
 class PreviewSubjectsShareQuery(ReferenceActionConfiguration):
     """What Share Subjects would share with these values: the portal sends the
-    section's whole form; only the subject group selection matters here."""
+    section's whole form; the subject group selection and the area filter are read."""
     subject_groups: List[str] = Field(default_factory=list)
+    area_feature_groups: List[str] = Field(default_factory=list)

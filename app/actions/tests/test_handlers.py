@@ -7,7 +7,7 @@ import pytest
 from app.actions import action_handlers, handlers
 from app.actions.configurations import (
     AuthenticateConfig, ListEventTypesQuery, ListFeatureGroupsQuery, ListSubjectGroupsQuery,
-    SyncEventsConfig, SyncObservationsConfig,
+    PreviewEventsShareQuery, PreviewSubjectsShareQuery, SyncEventsConfig, SyncObservationsConfig,
 )
 from app.ersharing import clients
 from app.ersharing.tests.fakes import FakeSite
@@ -91,3 +91,20 @@ async def test_reference_actions_list_source_options(source):
     assert [(o["value"], o["label"]) for o in groups["options"]] == [("g1", "Lions")]
     areas = await handlers.action_list_feature_groups(INTEGRATION, ListFeatureGroupsQuery())
     assert [(o["value"], o["label"]) for o in areas["options"]] == [("fg1", "Park")]
+
+
+@pytest.mark.asyncio
+async def test_preview_actions_read_the_source_with_the_form_selection(source):
+    source.categories = {"security": {"value": "security", "display": "Security"}}
+    source.event_types = {"a": {"value": "a", "display": "Alpha", "category": "security"},
+                          "b": {"value": "b", "display": "Bravo", "category": "security"}}
+    source.subject_groups = [{"id": "g1", "name": "Lions", "subjects": [{"id": "s1", "name": "Leo"}]},
+                             {"id": "g2", "name": "Rhinos", "subjects": [{"id": "s2", "name": "Rex"}]}]
+    # The portal sends the whole form; only the selection is read.
+    events = await handlers.action_preview_events_share(
+        INTEGRATION, PreviewEventsShareQuery.parse_obj({"event_types": ["b"], "run_on_schedule": True}))
+    assert (events["mode"], events["source_site"]) == ("selected", "https://sitea.pamdas.org")
+    assert [i["value"] for g in events["groups"] for i in g["items"]] == ["b"]
+    subjects = await handlers.action_preview_subjects_share(
+        INTEGRATION, PreviewSubjectsShareQuery.parse_obj({"subject_groups": ["g2"], "compatibility": {}}))
+    assert [g["label"] for g in subjects["groups"]] == ["Rhinos"]

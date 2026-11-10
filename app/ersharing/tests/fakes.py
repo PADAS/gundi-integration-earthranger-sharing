@@ -224,8 +224,10 @@ class FakeSite:
         self._hit("patch_event_category", data)
         self.categories[data["value"]] = copy.deepcopy(data)
 
-    async def list_event_types_v2(self):
+    async def list_event_types_v2(self, include_schema=True, include_inactive=False):
         self._hit("list_event_types_v2")
+        self.v2_list_include_schema = include_schema
+        self.v2_list_include_inactive = include_inactive
         return copy.deepcopy(list(self.event_types.values()))
 
     async def list_event_types_v1(self):

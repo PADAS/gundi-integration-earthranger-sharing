@@ -141,3 +141,52 @@ async def test_long_groups_are_cut_and_say_so(site, monkeypatch):
     assert result["truncated"] is True
     assert len(result["groups"][0]["items"]) == 1
     assert result["groups"][0]["total_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_type_whose_category_isnt_listed_still_shows(site):
+    site.event_types_v1 = {"snare": {
+        "value": "snare", "display": "Snare", "is_active": True,
+        "category": {"value": "hidden_cat", "display": "Hidden category", "ordernum": 9},
+    }}
+    result = await preview_events(site, ["snare"])
+    assert [(g["label"], [i["value"] for i in g["items"]]) for g in result["groups"]] == [
+        ("Hidden category", ["snare"])]
+    assert result["missing_values"] == []
+
+
+@pytest.mark.asyncio
+async def test_picked_values_are_matched_exactly_as_stored(site):
+    # The sharing action compares stored values as they are, so the preview does too.
+    result = await preview_events(site, ["fire ", "fire"])
+    assert [i["value"] for g in result["groups"] for i in g["items"]] == ["fire"]
+    assert result["missing_values"] == ["fire "]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_token_is_named_as_such(site):
+    site.failures["get_event_categories"] = IntegrationAuthError("rejected", status_code=401)
+    result = await preview_events(site, [])
+    assert result["warning"] == "EarthRanger rejected this token on sitea.pamdas.org."
+
+
+@pytest.mark.asyncio
+async def test_event_types_are_listed_without_their_schemas(site):
+    await preview_events(site, [])
+    assert site.v2_list_include_schema is False
+
+
+@pytest.mark.asyncio
+async def test_inactive_v2_types_are_read_so_a_picked_one_isnt_missing(site):
+    result = await preview_events(site, ["old"])
+    assert site.v2_list_include_inactive is True
+    assert result["missing_values"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_area_filter_is_noted(site):
+    events = await preview_events(site, [], ["fg1"])
+    assert events["warning"] == "Only events inside the chosen areas are shared."
+    tracks = await preview_subjects(site, [], ["fg1", ""])
+    assert tracks["warning"] == "Only track points inside the chosen areas are shared."
+    assert (await preview_subjects(site, [], [""]))["warning"] is None

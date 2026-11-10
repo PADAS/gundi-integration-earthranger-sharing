@@ -102,11 +102,11 @@ async def action_preview_events_share(integration: Integration, action_config: P
     """What Share Events would share with the given selection (portal confirmation)."""
     from app.ersharing.preview import preview_events
     async with await _source_site(integration) as site:
-        return await preview_events(site, action_config.event_types)
+        return await preview_events(site, action_config.event_types, action_config.area_feature_groups)
 
 
 async def action_preview_subjects_share(integration: Integration, action_config: PreviewSubjectsShareQuery):
     """What Share Subjects would share with the given selection (portal confirmation)."""
     from app.ersharing.preview import preview_subjects
     async with await _source_site(integration) as site:
-        return await preview_subjects(site, action_config.subject_groups)
+        return await preview_subjects(site, action_config.subject_groups, action_config.area_feature_groups)
