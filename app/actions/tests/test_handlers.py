@@ -28,7 +28,8 @@ def source(monkeypatch):
 
 def test_all_actions_are_registered():
     assert sorted(action_handlers) == [
-        "auth", "list_event_types", "list_feature_groups", "list_subject_groups", "sync_events", "sync_observations",
+        "auth", "list_event_types", "list_feature_groups", "list_subject_groups",
+        "preview_events_share", "preview_subjects_share", "sync_events", "sync_observations",
     ]
 
 

@@ -11,7 +11,7 @@ from app.services.action_scheduler import crontab_schedule
 from app.services.activity_logger import activity_logger
 from .configurations import (
     AuthenticateConfig, ERAuthenticationType, ListEventTypesQuery, ListFeatureGroupsQuery, ListSubjectGroupsQuery,
-    SyncEventsConfig, SyncObservationsConfig,
+    PreviewEventsShareQuery, PreviewSubjectsShareQuery, SyncEventsConfig, SyncObservationsConfig,
 )
 from .core import ReferenceDataResponse, ReferenceOption, action_title
 
@@ -96,3 +96,17 @@ async def action_list_feature_groups(integration: Integration, action_config: Li
         feature_groups = await site.list_feature_groups()
     options = [ReferenceOption(value=str(f["id"]), label=f.get("name")) for f in feature_groups]
     return ReferenceDataResponse(options=sorted(options, key=lambda o: (o.label or "").lower())).dict()
+
+
+async def action_preview_events_share(integration: Integration, action_config: PreviewEventsShareQuery):
+    """What Share Events would share with the given selection (portal confirmation)."""
+    from app.ersharing.preview import preview_events
+    async with await _source_site(integration) as site:
+        return await preview_events(site, action_config.event_types)
+
+
+async def action_preview_subjects_share(integration: Integration, action_config: PreviewSubjectsShareQuery):
+    """What Share Subjects would share with the given selection (portal confirmation)."""
+    from app.ersharing.preview import preview_subjects
+    async with await _source_site(integration) as site:
+        return await preview_subjects(site, action_config.subject_groups)

@@ -232,3 +232,15 @@ class ListSubjectGroupsQuery(ReferenceActionConfiguration):
 
 class ListFeatureGroupsQuery(ReferenceActionConfiguration):
     """The source site's spatial feature groups."""
+
+
+class PreviewEventsShareQuery(ReferenceActionConfiguration):
+    """What Share Events would share with these values: the portal sends the
+    section's whole form; only the event type selection matters here."""
+    event_types: List[str] = Field(default_factory=list)
+
+
+class PreviewSubjectsShareQuery(ReferenceActionConfiguration):
+    """What Share Subjects would share with these values: the portal sends the
+    section's whole form; only the subject group selection matters here."""
+    subject_groups: List[str] = Field(default_factory=list)
