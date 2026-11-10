@@ -6,7 +6,8 @@ gundi:share_preview contract; see gundi-portal
 docs/superpowers/specs/2026-11-09-er2er-sharing-preview-modal-design.md.
 
 They read the same things the sharing actions read when they run: event
-categories and v2 event types, and subject groups with their subjects.
+categories and event types (v2, and the v1 types ER's v2 list leaves out),
+and subject groups with their subjects.
 """
 from typing import Dict, Iterable, List, Optional
 
@@ -72,6 +73,10 @@ async def preview_events(site, event_types: Optional[Iterable]) -> dict:
     try:
         categories = await site.get_event_categories()
         types = await site.list_event_types_v2()
+        # Events of v1 types are shared too (copied into a type the destination
+        # already has), and ER's v2 list leaves those types out.
+        v2_values = {t.get("value") for t in types}
+        types += [t for t in await site.list_event_types_v1() if t.get("value") not in v2_values]
     except IntegrationAuthError:
         return _response(site_url, mode, 0, 0, [], [], _cant_read("event types", site_url))
 

@@ -66,6 +66,34 @@ async def test_picked_event_types_with_missing_and_inactive_ones(site):
 
 
 @pytest.mark.asyncio
+async def test_v1_event_types_are_listed_too(site):
+    # A site whose types are all v1: ER's v2 list is empty, yet those events
+    # are shared, so the preview must list them.
+    site.event_types = {}
+    site.event_types_v1 = {
+        "cluster": {"value": "cluster", "display": "Cluster", "category": {"value": "monitoring"},
+                    "icon_id": "cluster_rep", "default_priority": 100, "is_active": True},
+        "retired": {"value": "retired", "display": "Retired", "category": {"value": "monitoring"},
+                    "is_active": False},
+    }
+    result = await preview_events(site, [])
+    assert [i["value"] for g in result["groups"] for i in g["items"]] == ["cluster"]
+    assert result["groups"][0]["items"][0]["icon_url"] == f"{SITE}/static/sprite-src/cluster_rep.svg"
+    assert (result["selected_count"], result["total_count"]) == (1, 1)
+    picked = await preview_events(site, ["retired"])
+    assert picked["missing_values"] == []
+    assert [i["is_active"] for g in picked["groups"] for i in g["items"]] == [False]
+
+
+@pytest.mark.asyncio
+async def test_a_type_on_both_lists_is_listed_once(site):
+    site.event_types_v1 = {"fire": {"value": "fire", "display": "Fire (v1)", "category": {"value": "monitoring"}}}
+    result = await preview_events(site, [])
+    labels = [i["label"] for g in result["groups"] for i in g["items"]]
+    assert labels.count("Fire") == 1 and "Fire (v1)" not in labels
+
+
+@pytest.mark.asyncio
 async def test_events_a_token_that_cant_read_them_gets_a_warning(site):
     site.failures["list_event_types_v2"] = IntegrationAuthError("denied", status_code=403)
     result = await preview_events(site, [])
