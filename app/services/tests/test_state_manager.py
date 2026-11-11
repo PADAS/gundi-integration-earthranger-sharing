@@ -292,3 +292,14 @@ async def test_state_redis_retry_backoff_does_not_block_the_event_loop(mocker, m
 
     assert state == {}
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_state_manager_compare_and_delete_runs_one_script(mocker, mock_redis):
+    mocker.patch("app.services.state.redis", mock_redis)
+    manager = IntegrationStateManager()
+    mock_redis.Redis.return_value.eval.return_value = async_return(1)
+    assert await manager.delete_if_equal("i1", "sync_events", '"tok"', source_id="lease") is True
+    script, numkeys, key, value = mock_redis.Redis.return_value.eval.call_args.args
+    assert (numkeys, key, value) == (1, "integration_state.i1.sync_events.lease", '"tok"')
+    assert "GET" in script and "DEL" in script
