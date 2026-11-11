@@ -191,3 +191,39 @@ def test_a_batch_sent_mid_window_keeps_the_created_watermark():
     sent = advance(marker, [late(1), late(2)], six, keep_created=True)
     assert sent.created_since == six
     assert is_new(late(3), sent)  # still new if the later batch failed
+
+
+# --- Round 3 -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_removal_check_works_through_its_window_a_chunk_at_a_time(monkeypatch):
+    from datetime import timedelta
+    from app.ersharing import sync_events
+    from app.ersharing.tests.test_sync_events_run import destination, provenance, reconcile_run
+    from app.ersharing.timeutil import utcnow
+    monkeypatch.setattr(sync_events, "RECONCILE_CHUNK", 2)
+    source, dest = FakeSite(SOURCE_URL, role="source"), FakeSite()
+    for n in range(5):
+        dest.events[f"gone{n}"] = make_event(f"gone{n}", (utcnow() - timedelta(days=5 - n)).isoformat(),
+                                             event_details=provenance(f"gone{n}"))
+    run = reconcile_run(source)
+    report = DestinationReport("Site B", "Events")
+    assert await sync_events.reconcile_destination(run, destination(1), dest, report) is True
+    assert not dest.events and report.deleted == 5
+    assert len(dest.calls_to("iter_events_updated_since")) == 2  # listed again after the first chunk
+
+
+@pytest.mark.asyncio
+async def test_the_revisit_lists_are_saved_before_the_bookmark():
+    from app.ersharing.tests.test_sync_events import setup, sync
+    source, dest, state, run = setup(make_event("e1", "2026-10-01T00:00:00Z", event_type="unknown_type"))
+    writes = []
+    for name in ("set_waiting_types", "set_pending_events", "set_marker"):
+        original = getattr(state, name)
+
+        async def record(*args, _name=name, _original=original):
+            writes.append(_name)
+            return await _original(*args)
+        setattr(state, name, record)
+    await sync(run, dest)
+    assert writes.index("set_waiting_types") < writes.index("set_marker")

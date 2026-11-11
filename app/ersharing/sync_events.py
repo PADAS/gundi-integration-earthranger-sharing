@@ -76,15 +76,17 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
         await catch_up_waiting_types(run, destination, dest, types, report)
         await finish_pending_copies(run, destination, dest, types, report, pending_before)
     finally:
+        # The lists of events to revisit are saved before the bookmark moves past them, so a
+        # failed write can't leave the bookmark ahead of what they record.
+        if types.waiting != waiting_before:
+            await run.state.set_waiting_types(destination.id, types.waiting)
+        if pending != pending_before:
+            await run.state.set_pending_events(destination.id, list(pending))
         # Events arrive oldest first, so `since` is the last fully handled update.
         if marker is None or since != marker.since:
             await run.state.set_marker(EVENTS_ACTION, marker_key(destination.id),
                                        Marker(since=since, advanced_at=now))
         report.marker = since
-        if types.waiting != waiting_before:
-            await run.state.set_waiting_types(destination.id, types.waiting)
-        if pending != pending_before:
-            await run.state.set_pending_events(destination.id, list(pending))
     await sync_incident_links(run, destination, dest, report)
 
 
@@ -280,6 +282,7 @@ async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Op
 
 
 RECONCILE_EVERY_SECONDS = 24 * 60 * 60
+RECONCILE_CHUNK = 500  # copies listed before they are checked
 BUDGET_FRACTION = 0.8
 LEASE_MARGIN_SECONDS = 30
 
@@ -300,21 +303,29 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
     checked = cursor.since if cursor else utcnow() - RECONCILE_WINDOW
     finished = False
     try:
-        # Listed in full before anything is deleted: deleting while paging by number would
-        # shift later copies onto pages already read, and they'd be missed.
-        copies = []
-        async for page in dest.iter_events_updated_since(checked, with_notes_and_files=False):
-            if run.out_of_time():
-                return False
-            copies.extend(page)
-        for copy in copies:
-            if run.out_of_time():
-                return False
-            await _reconcile_copy(run, destination, dest, copy, report)
-            if copy.get("updated_at"):
-                checked = max(checked, parse_dt(copy["updated_at"]))
-        finished = True
-        return True
+        # Copies are listed a chunk at a time and checked before the next chunk is listed,
+        # starting again from the last one checked: deleting while paging by number would
+        # shift unread copies onto pages already read, and a listing cut short by the time
+        # budget would otherwise start over every run.
+        while True:
+            copies, listed_all = [], True
+            async for page in dest.iter_events_updated_since(checked, with_notes_and_files=False):
+                copies.extend(page)
+                if len(copies) >= RECONCILE_CHUNK or run.out_of_time():
+                    listed_all = False
+                    break
+            before = checked
+            for copy in copies:
+                if run.out_of_time():
+                    return False
+                await _reconcile_copy(run, destination, dest, copy, report)
+                if copy.get("updated_at"):
+                    checked = max(checked, parse_dt(copy["updated_at"]))
+            if listed_all:
+                finished = True
+                return True
+            if run.out_of_time() or checked == before:
+                return False  # the saved position carries on next run
     finally:
         if finished:
             await run.state.delete_marker(EVENTS_ACTION, key)
