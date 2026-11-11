@@ -194,6 +194,7 @@ async def _copy_event(run, destination, dest, types, event, report):
         complete = True
     finally:
         # Saved on failure too so copied notes aren't re-posted; the old updated_at keeps the event due.
+        record.pending = not complete
         if complete:
             record.updated_at = parse_dt(event["updated_at"])
         await run.state.set_event_record(destination.id, event["id"], record)
@@ -213,8 +214,15 @@ async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Op
     if record is None and not is_copy_of(existing, event["id"], run.source.url, run.settings.source.value):
         return None
     if dest_is_newer(existing, event):
+        if record is not None and record.pending:
+            # The newer copy is this runner's own earlier write, whose notes, files or links
+            # didn't all land: finish those without rewriting the event.
+            return record
         return DEST_IS_NEWER
-    await dest.patch_event(existing["id"], {k: v for k, v in copy.items() if k != "id"})
+    changes = {k: v for k, v in copy.items() if k != "id"}
+    # clean_event leaves out an empty title; on an update that would keep the old one.
+    changes.setdefault("title", "")
+    await dest.patch_event(existing["id"], changes)
     report.updated += 1
     return record or adopt_record(event, existing)
 

@@ -30,6 +30,7 @@ class EventRecord(BaseModel):
     files: Dict[str, str] = Field(default_factory=dict)         # source file id -> dest file id ("" = not copied)
     incidents: List[str] = Field(default_factory=list)          # incident ids linked at the destination
     members: List[str] = Field(default_factory=list)            # incidents: source event ids held, as last checked
+    pending: bool = False  # notes, files or incident links still to finish after the event itself was written
 
 
 def _dump(model: BaseModel) -> dict:

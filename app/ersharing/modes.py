@@ -5,6 +5,7 @@ from typing import FrozenSet, List, Optional, Tuple, Union
 
 from app.actions.configurations import SyncEventsConfig, SyncObservationsConfig
 from .naming import SourceSystem, derive_source_system
+from .timeutil import parse_dt
 
 SIMPLE_PROVIDER_KEY = "das_provider"
 
@@ -49,18 +50,27 @@ def _pick(value, default):
     return default if value is None else value
 
 
+def _filled(values) -> Tuple[str, ...]:
+    """Pick-list values without blank rows, which the preview ignores too."""
+    return tuple(v for v in values or () if v is not None and str(v).strip())
+
+
+def _aware(value: Optional[datetime]) -> Optional[datetime]:
+    return parse_dt(value) if value is not None else None
+
+
 def event_settings(source_url: str, config: SyncEventsConfig) -> EventSettings:
     c = config.compatibility
     return EventSettings(
         source=derive_source_system(source_url, c.source_system_value, c.source_system_name),
-        event_types=frozenset(config.event_types),
-        area_feature_groups=tuple(config.area_feature_groups),
+        event_types=frozenset(_filled(config.event_types)),
+        area_feature_groups=_filled(config.area_feature_groups),
         prepend_categories=_pick(c.prepend_system_to_categories, True),
         prepend_event_types=_pick(c.prepend_system_to_event_types, True),
         prepend_titles=_pick(c.prepend_system_to_event_titles, True),
         update_schema=_pick(c.update_schema, True),
         delete_unmatched=_pick(c.delete_unmatched_events, True),
-        start_from=config.start_from,
+        start_from=_aware(config.start_from),
     )
 
 
@@ -70,15 +80,15 @@ def observation_settings(source_url: str, config: SyncObservationsConfig) -> Obs
     group = config.destination_subject_group
     return ObservationSettings(
         source=source,
-        subject_groups=frozenset(config.subject_groups),
+        subject_groups=frozenset(_filled(config.subject_groups)),
         # Every share names its group at the destination: left empty, it is the source
         # site's name, so subjects never land in a destination's default group.
         destination_subject_group=(group or "").strip() or source.name,
-        area_feature_groups=tuple(config.area_feature_groups),
+        area_feature_groups=_filled(config.area_feature_groups),
         provider_key=_pick(c.provider_key, SIMPLE_PROVIDER_KEY),
         subject_additional=_pick(c.subject_additional, True),
         src_user=c.src_user,
-        start_from=config.start_from,
+        start_from=_aware(config.start_from),
     )
 
 

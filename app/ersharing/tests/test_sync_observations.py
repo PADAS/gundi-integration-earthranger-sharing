@@ -212,8 +212,11 @@ async def test_tracks_area_filter(world):
 
 @pytest.mark.asyncio
 async def test_out_of_time_resumes_after_the_last_subject(world, monkeypatch):
-    clock = iter([0, 0, 10 ** 9])  # deadline, s1 in time, s2 out of time
-    monkeypatch.setattr(sync_observations, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    # In time until s1's points have reached every destination, then out of time before s2.
+    monkeypatch.setattr(sync_observations, "time", SimpleNamespace(
+        monotonic=lambda: 10 ** 9 if all(any(p[0] == "s1" for p in points(world.sites[url]))
+                                         for url in ("https://site1.pamdas.org", "https://site2.pamdas.org"))
+        else 0))
     await run_sync_observations(INTEGRATION, CONFIG)
     sync_observations.trigger_action.assert_awaited_once_with("i1", OBSERVATIONS_ACTION)
     assert all(r.timed_out for r in world.published)

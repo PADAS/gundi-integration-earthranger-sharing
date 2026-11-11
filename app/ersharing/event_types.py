@@ -40,7 +40,11 @@ def _normalize_enum_names(properties: Dict) -> None:
     """ER expects enumNames as a value->label mapping; legacy schemas use a list."""
     for prop in properties.values():
         if isinstance(prop, dict) and isinstance(prop.get("enumNames"), list):
-            prop["enumNames"] = {v: v for v in prop["enumNames"]}
+            labels, values = prop["enumNames"], prop.get("enum")
+            if isinstance(values, list) and len(values) == len(labels):
+                prop["enumNames"] = {str(v): label for v, label in zip(values, labels)}
+            else:
+                prop["enumNames"] = {v: v for v in labels}
 
 
 def add_provenance_fields_to_v2_schema(schema: Dict) -> Dict:

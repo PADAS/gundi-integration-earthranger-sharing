@@ -119,3 +119,16 @@ def passed_through(obs: dict, host: str) -> bool:
 def batches(items: list, size: int = MAX_BATCH) -> Iterator[list]:
     for i in range(0, len(items), size):
         yield items[i:i + size]
+
+
+def point_batches(points: List[dict], size: int = MAX_BATCH) -> Iterator[List[dict]]:
+    """Batches of points sorted by recorded_at that never split points recorded at the same
+    moment, so a later batch that fails can't hold a point the marker already counts as sent."""
+    batch: List[dict] = []
+    for point in points:
+        if len(batch) >= size and parse_dt(point["recorded_at"]) != parse_dt(batch[-1]["recorded_at"]):
+            yield batch
+            batch = []
+        batch.append(point)
+    if batch:
+        yield batch

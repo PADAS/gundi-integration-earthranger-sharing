@@ -74,6 +74,10 @@ async def _source_site(integration):
 async def action_list_event_types(integration: Integration, action_config: ListEventTypesQuery):
     async with await _source_site(integration) as site:
         event_types = await site.list_event_types_v2()
+        # v1 types are shared too, so they belong in the picker; a v2 type wins on the same value.
+        known = {t["value"] for t in event_types}
+        event_types += [t for t in await site.list_event_types_v1()
+                        if t.get("is_active", True) and t.get("value") not in known]
 
     def group(event_type):
         category = event_type.get("category")

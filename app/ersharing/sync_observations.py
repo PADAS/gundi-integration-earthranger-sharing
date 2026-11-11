@@ -19,8 +19,8 @@ from .geo import load_area
 from .modes import observation_settings
 from .naming import site_host
 from .observations import (
-    add_lineage, advance, batches, build_payload, has_valid_location, in_assignment, is_new, parse_assignments,
-    passed_through, read_start,
+    add_lineage, advance, build_payload, has_valid_location, in_assignment, is_new, parse_assignments,
+    passed_through, point_batches, read_start,
 )
 from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
@@ -101,59 +101,61 @@ async def _run(integration, config, state: ShareState):
 
     reports = {d.id: DestinationReport(destination=d.name, kind="Tracks") for d in destinations}
     freshest: Dict[str, Marker] = {}  # per destination, the subject marker that moved most recently
-    async with AsyncExitStack() as stack:
-        source = await stack.enter_async_context(
-            open_site(source_url, auth, role="source"))
-        sites = {}
+    try:
+        async with AsyncExitStack() as stack:
+            source = await stack.enter_async_context(
+                open_site(source_url, auth, role="source"))
+            sites = {}
+            for d in destinations:
+                try:
+                    sites[d.id] = await stack.enter_async_context(open_site(d.url, d.auth, role="destination"))
+                except IntegrationError as e:
+                    reports[d.id].error(e.message)
+            area = await load_area(source, share.area_feature_groups, polygons_only=True)
+            subjects = await select_subjects(source, share.subject_groups)
+            assignments = await _load_assignments(source, [str(s["id"]) for s in subjects])
+            src_user = share.src_user or (await source.get_me()).get("username", "")
+            now = utcnow()
+            prefix = f"site:{site_host(source.url)}#user:{src_user}"
+            cursor = await state.get_cursor(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
+            last = cursor
+            for subject in subjects:
+                subject_id = str(subject["id"])
+                if cursor is not None and subject_id <= cursor:
+                    continue
+                if not sites:
+                    break
+                finished = time.monotonic() <= deadline and await _share_subject(
+                    source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
+                    deadline)
+                if not finished:
+                    # Out of time: the next run starts again at this subject; its sent batches
+                    # already moved its markers, so nothing is sent twice.
+                    for d_id in sites:
+                        reports[d_id].timed_out = True
+                    if last is not None:
+                        await state.set_cursor(OBSERVATIONS_ACTION, SUBJECT_CURSOR, last)
+                    else:
+                        await state.delete_marker(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
+                    break
+                last = subject_id
+            else:
+                await state.delete_marker(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
+    finally:
+        # Published even when a source read stops the run, so points already sent are reported.
         for d in destinations:
+            report = reports[d.id]
             try:
-                sites[d.id] = await stack.enter_async_context(open_site(d.url, d.auth, role="destination"))
-            except IntegrationError as e:
-                reports[d.id].error(e.message)
-        details_due = set()
-        if share.subject_additional:
-            for d_id in sites:
-                if await state.once_per(OBSERVATIONS_ACTION, f"{d_id}:details-check", DETAILS_CHECK_EVERY_SECONDS):
-                    details_due.add(d_id)
-        area = await load_area(source, share.area_feature_groups, polygons_only=True)
-        subjects = await select_subjects(source, share.subject_groups)
-        assignments = await _load_assignments(source, [str(s["id"]) for s in subjects])
-        src_user = share.src_user or (await source.get_me()).get("username", "")
-        now = utcnow()
-        prefix = f"site:{site_host(source.url)}#user:{src_user}"
-        cursor = await state.get_cursor(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
-        last = cursor
-        for subject in subjects:
-            subject_id = str(subject["id"])
-            if cursor is not None and subject_id <= cursor:
-                continue
-            if not sites:
-                break
-            if time.monotonic() > deadline:
-                for d_id in sites:
-                    reports[d_id].timed_out = True
-                if last is not None:
-                    await state.set_cursor(OBSERVATIONS_ACTION, SUBJECT_CURSOR, last)
-                break
-            await _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject,
-                                 prefix, now, details_due)
-            last = subject_id
-        else:
-            await state.delete_marker(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
-
-    for d in destinations:
-        report = reports[d.id]
-        try:
-            await publish_report(integration_id, OBSERVATIONS_ACTION, report)
-            marker = await _progress_marker(state, d.id, freshest.get(d.id), report)
-            if report.errors and is_stalled(marker, utcnow()):
-                await log_action_activity(
-                    integration_id=integration_id, action_id=OBSERVATIONS_ACTION, level=LogLevel.WARNING,
-                    title=f"Tracks → {d.name}: no progress since {marker.advanced_at:%Y-%m-%d %H:%M} UTC. "
-                          f"Check the errors above.",
-                )
-        except Exception:
-            logger.exception("Couldn't publish the tracks report for %s", d.name)
+                await publish_report(integration_id, OBSERVATIONS_ACTION, report)
+                marker = await _progress_marker(state, d.id, freshest.get(d.id), report)
+                if report.errors and is_stalled(marker, utcnow()):
+                    await log_action_activity(
+                        integration_id=integration_id, action_id=OBSERVATIONS_ACTION, level=LogLevel.WARNING,
+                        title=f"Tracks → {d.name}: no progress since {marker.advanced_at:%Y-%m-%d %H:%M} UTC. "
+                              f"Check the errors above.",
+                    )
+            except Exception:
+                logger.exception("Couldn't publish the tracks report for %s", d.name)
     return ({"destinations": [r.as_dict() for r in reports.values()]},
             any(r.timed_out for r in reports.values()))
 
@@ -174,7 +176,9 @@ async def _progress_marker(state: ShareState, destination_id: str, freshest, rep
 
 
 async def _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
-                         details_due=frozenset()):
+                         deadline: float = float("inf")) -> bool:
+    """Share one subject's new points with every destination. False when the run ran out
+    of time part-way, so the caller resumes at this subject next time."""
     subject_id = str(subject["id"])
     label = subject.get("name") or subject_id
     markers = {d_id: await state.get_marker(OBSERVATIONS_ACTION, subject_marker_key(d_id, subject_id))
@@ -194,7 +198,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             raise
         for d_id in sites:
             reports[d_id].error(SOURCE_DENIED if denied else SOURCE_FAILED, item=f"{label}: {e.message}")
-        return
+        return True
 
     candidates = sorted(
         (o for o in observations
@@ -204,12 +208,16 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
         key=lambda o: parse_dt(o["recorded_at"]),
     )
     fingerprint = f"{prefix}#subject:{subject_id}#rts:{now:%Y%m%d%H%M%S}"
+    finished = True
     for d_id, dest in list(sites.items()):
         key = subject_marker_key(d_id, subject_id)
         marker = markers[d_id]
         complete = True
         host = site_host(dest.url)
-        for batch in batches([o for o in candidates if is_new(o, marker) and not passed_through(o, host)]):
+        for batch in point_batches([o for o in candidates if is_new(o, marker) and not passed_through(o, host)]):
+            if time.monotonic() > deadline:
+                complete = finished = False
+                break
             payloads = [add_lineage(build_payload(subject, o, share, source_additional), fingerprint) for o in batch]
             try:
                 complete = await _send(dest, share.provider_key, payloads, reports[d_id], label)
@@ -227,13 +235,21 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             if moved != marker:
                 marker = moved
                 await state.set_marker(OBSERVATIONS_ACTION, key, marker)
-        if d_id in details_due and marker is not None and d_id in sites:
-            await _refresh_details(dest, d_id, state, subject, source_additional, reports[d_id], label)
+        if (share.subject_additional and marker is not None and d_id in sites
+                and await state.once_per(OBSERVATIONS_ACTION, f"{d_id}:details-check:{subject_id}",
+                                         DETAILS_CHECK_EVERY_SECONDS)):
+            try:
+                await _refresh_details(dest, d_id, state, subject, source_additional, reports[d_id], label)
+            except IntegrationError as e:
+                # Like a failed point send: this destination stops for the run, the others go on.
+                reports[d_id].error(e.message)
+                del sites[d_id]
         if marker is not None:
             current = reports[d_id].marker
             reports[d_id].marker = marker.since if current is None else max(current, marker.since)
             if d_id not in freshest or marker.advanced_at > freshest[d_id].advanced_at:
                 freshest[d_id] = marker
+    return finished
 
 
 class _WholeBatchRejected(Exception):
