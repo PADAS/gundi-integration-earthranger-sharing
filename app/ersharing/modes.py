@@ -71,7 +71,9 @@ def observation_settings(source_url: str, config: SyncObservationsConfig) -> Obs
     return ObservationSettings(
         source=source,
         subject_groups=frozenset(config.subject_groups),
-        destination_subject_group=source.name if group is None else (group or None),
+        # Every share names its group at the destination: left empty, it is the source
+        # site's name, so subjects never land in a destination's default group.
+        destination_subject_group=(group or "").strip() or source.name,
         area_feature_groups=tuple(config.area_feature_groups),
         provider_key=_pick(c.provider_key, SIMPLE_PROVIDER_KEY),
         subject_additional=_pick(c.subject_additional, True),

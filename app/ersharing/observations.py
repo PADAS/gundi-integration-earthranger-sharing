@@ -108,6 +108,14 @@ def add_lineage(payload: dict, fingerprint: str) -> dict:
     return payload
 
 
+def passed_through(obs: dict, host: str) -> bool:
+    """The point's sharing history already lists `host`, so sending it there would
+    bounce it back to a site it came from (two sites sharing with each other)."""
+    lineage = (obs.get("observation_details") or {}).get("sharing_lineage") or []
+    stamp = f"site:{host}#"
+    return any(isinstance(entry, str) and entry.lower().startswith(stamp) for entry in lineage)
+
+
 def batches(items: list, size: int = MAX_BATCH) -> Iterator[list]:
     for i in range(0, len(items), size):
         yield items[i:i + size]

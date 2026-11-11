@@ -76,6 +76,8 @@ class FakeSite:
         self.downloaded_paths: List[str] = []
         self.uploaded: Dict[str, bytes] = {}
         self.sharing_posts: List[tuple] = []
+        self.subjects: Dict[str, dict] = {}  # destination subjects by id, for detail updates
+        self.v1_conversions: Dict[str, Optional[dict]] = {}  # v1 type value -> EarthRanger's dry-run result
         self.calls: List[tuple] = []
         self.failures: Dict[str, Failure] = {}
         self.unreadable: set = set()
@@ -274,6 +276,21 @@ class FakeSite:
         if feature_group_id not in self.feature_groups:
             raise not_found(self.label)
         return copy.deepcopy(self.feature_groups[feature_group_id])
+
+    async def preview_v1_type_as_v2(self, value):
+        self._hit("preview_v1_type_as_v2", value)
+        return copy.deepcopy(self.v1_conversions.get(value))
+
+    async def patch_subject(self, subject_id, data):
+        self._hit("patch_subject", subject_id, data)
+        self.subjects.setdefault(subject_id, {"id": subject_id}).update(copy.deepcopy(data))
+
+    async def patch_source(self, source_id, data):
+        self._hit("patch_source", source_id, data)
+        for sources in self.subject_sources.values():
+            for src in sources:
+                if src.get("id") == source_id:
+                    src.update(copy.deepcopy(data))
 
     async def post_sharing_status(self, provider_key, payloads):
         self._hit("post_sharing_status", provider_key, payloads)

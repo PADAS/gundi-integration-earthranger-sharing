@@ -1,4 +1,6 @@
 """sync_observations: share subject tracks with each destination (spec §8)."""
+import hashlib
+import json
 import logging
 import time
 from contextlib import AsyncExitStack
@@ -18,9 +20,9 @@ from .modes import observation_settings
 from .naming import site_host
 from .observations import (
     add_lineage, advance, batches, build_payload, has_valid_location, in_assignment, is_new, parse_assignments,
-    read_start,
+    passed_through, read_start,
 )
-from .reporting import DestinationReport, is_stalled, publish_report
+from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
 from .timeutil import parse_dt, utcnow
 
@@ -38,6 +40,9 @@ SOURCE_FAILED = "Some subjects' tracks weren't shared because the source site co
 REJECTED = "Some track points weren't shared because the destination turned them down."
 NOT_ACCEPTED = "Some track points weren't shared because the destination couldn't take them."
 ALL_REJECTED = "Some track points weren't shared because the destination turned down every point in the batch."
+DETAILS_NOT_UPDATED = "Some subjects' details weren't updated because the destination didn't accept the change."
+# How often subject and device details are compared with what was last sent to each destination.
+DETAILS_CHECK_EVERY_SECONDS = 24 * 60 * 60
 
 
 def subject_marker_key(destination_id: str, subject_id: str) -> str:
@@ -87,9 +92,7 @@ async def _run(integration, config, state: ShareState):
     source_url = source_url_of(integration, auth)
     share = observation_settings(source_url, config)
     destinations, skipped = await resolve_destinations(integration_id, source_url)
-    for item in skipped:
-        await log_action_activity(integration_id=integration_id, action_id=OBSERVATIONS_ACTION,
-                                  title=f"Destination {item.name} skipped: {item.reason}", level=LogLevel.WARNING)
+    await log_skipped_destinations(integration_id, OBSERVATIONS_ACTION, state, skipped)
     if not destinations:
         await log_action_activity(integration_id=integration_id, action_id=OBSERVATIONS_ACTION,
                                   title="No EarthRanger destinations to share subject tracks with.",
@@ -107,6 +110,11 @@ async def _run(integration, config, state: ShareState):
                 sites[d.id] = await stack.enter_async_context(open_site(d.url, d.auth, role="destination"))
             except IntegrationError as e:
                 reports[d.id].error(e.message)
+        details_due = set()
+        if share.subject_additional:
+            for d_id in sites:
+                if await state.once_per(OBSERVATIONS_ACTION, f"{d_id}:details-check", DETAILS_CHECK_EVERY_SECONDS):
+                    details_due.add(d_id)
         area = await load_area(source, share.area_feature_groups, polygons_only=True)
         subjects = await select_subjects(source, share.subject_groups)
         assignments = await _load_assignments(source, [str(s["id"]) for s in subjects])
@@ -128,7 +136,7 @@ async def _run(integration, config, state: ShareState):
                     await state.set_cursor(OBSERVATIONS_ACTION, SUBJECT_CURSOR, last)
                 break
             await _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject,
-                                 prefix, now)
+                                 prefix, now, details_due)
             last = subject_id
         else:
             await state.delete_marker(OBSERVATIONS_ACTION, SUBJECT_CURSOR)
@@ -165,7 +173,8 @@ async def _progress_marker(state: ShareState, destination_id: str, freshest, rep
     return waiting
 
 
-async def _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now):
+async def _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
+                         details_due=frozenset()):
     subject_id = str(subject["id"])
     label = subject.get("name") or subject_id
     markers = {d_id: await state.get_marker(OBSERVATIONS_ACTION, subject_marker_key(d_id, subject_id))
@@ -199,7 +208,8 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
         key = subject_marker_key(d_id, subject_id)
         marker = markers[d_id]
         complete = True
-        for batch in batches([o for o in candidates if is_new(o, marker)]):
+        host = site_host(dest.url)
+        for batch in batches([o for o in candidates if is_new(o, marker) and not passed_through(o, host)]):
             payloads = [add_lineage(build_payload(subject, o, share, source_additional), fingerprint) for o in batch]
             try:
                 complete = await _send(dest, share.provider_key, payloads, reports[d_id], label)
@@ -217,6 +227,8 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             if moved != marker:
                 marker = moved
                 await state.set_marker(OBSERVATIONS_ACTION, key, marker)
+        if d_id in details_due and marker is not None and d_id in sites:
+            await _refresh_details(dest, d_id, state, subject, source_additional, reports[d_id], label)
         if marker is not None:
             current = reports[d_id].marker
             reports[d_id].marker = marker.since if current is None else max(current, marker.since)
@@ -334,3 +346,32 @@ async def _send_splitting(dest, provider_key: str, payloads: List[dict], report:
     if outcome is not None:
         return outcome
     return await _split_rejected(dest, provider_key, payloads, report, label, split, split.rejection)
+
+
+async def _refresh_details(dest, destination_id: str, state, subject: dict, source_additional: Dict[str, dict],
+                           report: DestinationReport, label: str):
+    """EarthRanger sets a shared subject's details only when it first creates it, so
+    details changed at the source later are sent here, once they differ from what this
+    destination last got. The copy keeps the source subject's id, and its device keeps
+    the source device's id as its manufacturer id."""
+    subject_id = str(subject["id"])
+    subject_details = subject.get("additional") or {}
+    digest = hashlib.sha1(json.dumps({"subject": subject_details, "sources": source_additional},
+                                     sort_keys=True, default=str).encode()).hexdigest()
+    key = f"{destination_id}:details:{subject_id}"
+    if await state.get_value(OBSERVATIONS_ACTION, key) == digest:
+        return
+    try:
+        await dest.patch_subject(subject_id, {"additional": subject_details})
+        for copy in await dest.get_subject_sources(subject_id):
+            details = source_additional.get(str(copy.get("manufacturer_id")))
+            if details is not None and (copy.get("additional") or {}) != details:
+                await dest.patch_source(str(copy["id"]), {"additional": details})
+    except IntegrationError as e:
+        if e.status_code == 404:
+            return  # not at the destination (yet)
+        if halts_site(e) and e.status_code != 403:
+            raise
+        report.error(DETAILS_NOT_UPDATED, item=f"{label}: {e.message}", level=LogLevel.WARNING)
+        return
+    await state.set_value(OBSERVATIONS_ACTION, key, digest)

@@ -22,7 +22,7 @@ from .events import (
 from .geo import Area, load_area
 from .modes import EventSettings, event_settings
 from .notes_files import EPOCH, adopt_record, apply_files, apply_incidents, apply_notes, plan_files, plan_notes
-from .reporting import DestinationReport, is_stalled, publish_report
+from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
 from .state import EVENTS_ACTION, EventRecord, Marker, ShareState
 from .timeutil import parse_dt, utcnow
 
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 BACKFILL = timedelta(days=10)
 RECONCILE_WINDOW = timedelta(days=30)
+# How far back events skipped for their event type are read again once the type can be set up.
+CATCH_UP_LIMIT = timedelta(days=30)
 INCIDENT_LINKS_WINDOW = timedelta(days=30)
 # The destination's copy changed after this source change, so it is left alone (spec §7.3).
 DEST_IS_NEWER = object()
@@ -57,6 +59,8 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
     marker = await run.state.get_marker(EVENTS_ACTION, marker_key(destination.id))
     since = marker.since if marker else (run.settings.start_from or now - BACKFILL)
     types = EventTypeSync(run.source, dest, run.settings)
+    types.waiting = await run.state.get_waiting_types(destination.id)
+    waiting_before = dict(types.waiting)
     try:
         async for page in run.source.iter_events_updated_since(since):
             for event in page:
@@ -65,13 +69,43 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
                     return
                 await _sync_event(run, destination, dest, types, event, report)
                 since = max(since, parse_dt(event["updated_at"]))
+        await catch_up_waiting_types(run, destination, dest, types, report)
     finally:
         # Events arrive oldest first, so `since` is the last fully handled update.
         if marker is None or since != marker.since:
             await run.state.set_marker(EVENTS_ACTION, marker_key(destination.id),
                                        Marker(since=since, advanced_at=now))
         report.marker = since
+        if types.waiting != waiting_before:
+            await run.state.set_waiting_types(destination.id, types.waiting)
     await sync_incident_links(run, destination, dest, report)
+
+
+async def catch_up_waiting_types(run: EventsRun, destination: Destination, dest, types: EventTypeSync,
+                                 report: DestinationReport) -> None:
+    """Copy the events skipped while their event type couldn't be set up, once it can.
+    The bookmark moved past them, so they are read again from the oldest one skipped,
+    going back at most CATCH_UP_LIMIT. A type that still fails keeps waiting."""
+    if not types.waiting:
+        return
+    ready = set()
+    for value in list(types.waiting):
+        if value in types.failures:
+            continue  # failed again on this run
+        if await types.ensure(value) is not None:
+            ready.add(value)
+    if not ready:
+        return
+    start = max(min(types.waiting[v] for v in ready), utcnow() - CATCH_UP_LIMIT)
+    async for page in run.source.iter_events_updated_since(start):
+        for event in page:
+            if run.out_of_time():
+                report.timed_out = True
+                return  # still waiting: the next run reads them again
+            if event.get("event_type") in ready:
+                await _sync_event(run, destination, dest, types, event, report)
+    for value in ready:
+        types.waiting.pop(value, None)
 
 
 async def sync_incident_links(run: EventsRun, destination: Destination, dest, report: DestinationReport) -> None:
@@ -135,6 +169,10 @@ async def _copy_event(run, destination, dest, types, event, report):
         return
     dest_type = await types.ensure(event["event_type"])
     if dest_type is None:
+        updated = parse_dt(event["updated_at"])
+        waiting_since = types.waiting.get(event["event_type"])
+        if waiting_since is None or updated < waiting_since:
+            types.waiting[event["event_type"]] = updated
         report.failed += 1
         report.error(TYPE_NOT_READY, item=f"{event_label(event)}, event type {types.failures[event['event_type']]}")
         return
@@ -276,9 +314,7 @@ async def _run(integration, config, state: ShareState):
     source_url = source_url_of(integration, auth)
     share = event_settings(source_url, config)
     destinations, skipped = await resolve_destinations(integration_id, source_url)
-    for item in skipped:
-        await log_action_activity(integration_id=integration_id, action_id=EVENTS_ACTION,
-                                  title=f"Destination {item.name} skipped: {item.reason}", level=LogLevel.WARNING)
+    await log_skipped_destinations(integration_id, EVENTS_ACTION, state, skipped)
     if not destinations:
         await log_action_activity(integration_id=integration_id, action_id=EVENTS_ACTION,
                                   title="No EarthRanger destinations to share events with.", level=LogLevel.WARNING)

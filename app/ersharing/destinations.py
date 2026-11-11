@@ -7,7 +7,7 @@ from typing import List, Tuple
 from gundi_client_v2 import GundiClient
 from pydantic import ValidationError
 
-from app.actions.configurations import AuthenticateConfig
+from app.actions.configurations import AuthenticateConfig, ERAuthenticationType
 from app.services.utils import find_config_for_action
 from .naming import same_site, site_host
 
@@ -29,6 +29,25 @@ class SkippedDestination:
     id: str
     name: str
     reason: str
+
+
+def _secret(value) -> str:
+    if value is None:
+        return ""
+    return (value.get_secret_value() if hasattr(value, "get_secret_value") else str(value)).strip()
+
+
+def _missing_credentials(credentials: AuthenticateConfig) -> str:
+    """Why stored credentials can't be used as they are, or "" when they can. An
+    empty token would only be turned down by EarthRanger as wrong, which points
+    admins at the wrong fix."""
+    if credentials.authentication_type == ERAuthenticationType.USERNAME_PASSWORD:
+        if not (credentials.username or "").strip() or not _secret(credentials.password):
+            return "it has no username and password in Gundi"
+        return ""
+    if not _secret(credentials.token):
+        return "it has no token in Gundi"
+    return ""
 
 
 @asynccontextmanager
@@ -80,6 +99,10 @@ async def resolve_destinations(connection_id: str, source_url: str, gundi=None
                 credentials = AuthenticateConfig.parse_obj(auth.data)
             except ValidationError:
                 skipped.append(SkippedDestination(item_id, name, "its EarthRanger credentials in Gundi couldn't be read"))
+                continue
+            missing = _missing_credentials(credentials)
+            if missing:
+                skipped.append(SkippedDestination(item_id, name, missing))
                 continue
             destinations.append(Destination(item_id, name, url, credentials))
     return destinations, skipped

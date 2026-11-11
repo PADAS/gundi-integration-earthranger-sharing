@@ -2,6 +2,7 @@
 import copy
 import json
 import logging
+from datetime import datetime
 from typing import Dict, Optional, Set
 
 from app.services.errors import IntegrationConfigurationError, IntegrationError
@@ -110,6 +111,16 @@ def _as_schema(schema):
     return json.loads(schema) if isinstance(schema, str) else schema
 
 
+def refused_for_this_type(error: IntegrationError) -> bool:
+    """A refusal while setting up one category or type stops only that type: other
+    types keep flowing. A rejected token (401), a rate limit (429), an unreachable
+    site or a server error still stop the destination for this run."""
+    if isinstance(error, IntegrationConfigurationError):
+        return True
+    status = error.status_code or 0
+    return 400 <= status < 500 and status not in (401, 429)
+
+
 def same_event_type(wanted: dict, existing: dict) -> bool:
     """The destination type already has every field we would send."""
     for key, value in wanted.items():
@@ -134,7 +145,10 @@ class EventTypeSync:
         self._source_categories: Optional[Dict[str, dict]] = None
         self._dest_categories: Optional[Dict[str, dict]] = None
         self._dest_v1_types: Optional[Dict[str, dict]] = None
+        self._source_v1_types: Optional[Dict[str, dict]] = None
         self._categories_done: Set[str] = set()
+        # Source type -> oldest skipped event's updated_at, while the type can't be set up.
+        self.waiting: Dict[str, datetime] = {}
 
     async def ensure(self, source_value: str) -> Optional[dict]:
         if source_value in self._ready:
@@ -144,7 +158,7 @@ class EventTypeSync:
         try:
             dest_type = await self._ensure(source_value)
         except IntegrationError as e:
-            if halts_site(e) and not isinstance(e, IntegrationConfigurationError):
+            if halts_site(e) and not refused_for_this_type(e):
                 raise
             self.failures[source_value] = f"{source_value}: {e.message}"
             return None
@@ -194,10 +208,35 @@ class EventTypeSync:
             self._dest_v1_types = {t["value"]: t for t in await self._dest.list_event_types_v1()}
         if dest_value in self._dest_v1_types:
             return self._dest_v1_types[dest_value]
-        raise IntegrationConfigurationError(
-            f"is a v1 event type at the source and {dest_value} is missing at the destination. "
-            "v1 event types can't be created, so create it at the destination first"
-        )
+        return await self._create_v2_from_v1_source(source_value, dest_value)
+
+    async def _create_v2_from_v1_source(self, source_value: str, dest_value: str) -> dict:
+        """The destination has no such type, and v1 types can't be created any more, so a
+        v2 type is made from the source's v1 type with EarthRanger's own converter
+        (a dry run at the source: nothing changes there)."""
+        missing = (f"is a v1 event type at the source and {dest_value} is missing at the destination. "
+                   "v1 event types can't be created")
+        if not self._s.update_schema:
+            raise IntegrationConfigurationError(
+                f"{missing}, and updating destination event types is turned off, so create it at the destination first"
+            )
+        if self._source_v1_types is None:
+            self._source_v1_types = {t["value"]: t for t in await self._source.list_event_types_v1()}
+        src = self._source_v1_types.get(source_value)
+        try:
+            converted = await self._source.preview_v1_type_as_v2(source_value) if src else None
+        except IntegrationError as e:
+            if not refused_for_this_type(e):
+                raise
+            converted = None  # an EarthRanger version without the converter
+        if not converted or not converted.get("v2_schema") or converted.get("errors"):
+            reasons = "; ".join(str((m or {}).get("message", m)) for m in (converted or {}).get("errors") or [])
+            detail = f" (EarthRanger couldn't convert it to v2: {reasons})" if reasons else ""
+            raise IntegrationConfigurationError(f"{missing}{detail}, so create it at the destination first")
+        wanted = clean_event_type({**src, "schema": converted["v2_schema"]}, self._s)
+        await self._ensure_category(category_value(src))
+        await self._dest.post_event_type_v2(wanted)
+        return wanted
 
     async def _ensure_category(self, src_value: str):
         dest_value = dest_category_value(src_value, self._s)

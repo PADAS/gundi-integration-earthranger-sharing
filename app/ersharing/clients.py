@@ -388,6 +388,23 @@ class ERSite:
     async def patch_event_type_v2(self, data: dict):
         return await self._call(lambda: self._client.patch_event_type(data, version=VERSION_2_0))
 
+    async def preview_v1_type_as_v2(self, value: str) -> Optional[dict]:
+        """EarthRanger's own v1 → v2 conversion of an event type, as a dry run: nothing
+        changes on the site. {"v2_schema": ..., "errors": [...]}, or None when the site
+        has no converter (older EarthRanger versions)."""
+        data = await self._call(
+            lambda: self._client._post(
+                "activity/eventtypes/migrate/",
+                payload={"dry_run": True, "event_types": [{"event_type_value": value}]},
+                base_url=self._client._api_root(VERSION_2_0),
+            ),
+            none_on_404=True,
+        )
+        if not data:
+            return None
+        results = data if isinstance(data, list) else data.get("data", data)
+        return results[0] if isinstance(results, list) and results else None
+
     async def list_subject_groups(self) -> List[dict]:
         return _results(await self._call(
             lambda: self._client.get_subjectgroups(include_inactive=False, include_hidden=True, flat=True)
@@ -429,6 +446,12 @@ class ERSite:
 
     async def get_feature_group(self, feature_group_id: str) -> dict:
         return await self._call(lambda: self._client.get_feature_group(feature_group_id))
+
+    async def patch_subject(self, subject_id: str, data: dict):
+        return await self._call(lambda: self._client._patch(f"subject/{subject_id}", payload=data))
+
+    async def patch_source(self, source_id: str, data: dict):
+        return await self._call(lambda: self._client._patch(f"source/{source_id}", payload=data))
 
     async def post_sharing_status(self, provider_key: str, payloads: List[dict]):
         return await self._call(lambda: self._client._post(f"sensors/sharing/{provider_key}/status", payload=payloads))

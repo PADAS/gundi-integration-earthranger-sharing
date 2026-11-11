@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncEventsConfig
-from app.ersharing import sync_events
+from app.ersharing import reporting, sync_events
 from app.ersharing.destinations import Destination, SkippedDestination
 from app.ersharing.modes import event_settings
 from app.ersharing.reporting import DestinationReport
@@ -53,6 +53,7 @@ def world(monkeypatch):
                         AsyncMock(return_value=([destination(1), destination(2)], [])))
     monkeypatch.setattr(sync_events, "publish_report", AsyncMock(side_effect=lambda i, a, r: published.append(r)))
     monkeypatch.setattr(sync_events, "log_action_activity", logs)
+    monkeypatch.setattr(reporting, "log_action_activity", logs)
     monkeypatch.setattr(sync_events, "trigger_action", AsyncMock())
     return SimpleNamespace(source=source, sites=sites, manager=manager, published=published, logs=logs)
 

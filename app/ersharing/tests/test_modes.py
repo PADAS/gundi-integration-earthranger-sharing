@@ -79,9 +79,13 @@ def test_subject_additional_off_is_a_compatibility_override():
     assert compatibility_overrides(config, SOURCE) == ["subject_additional"]
 
 
-def test_empty_destination_group_means_no_group():
-    s = observation_settings(SOURCE, SyncObservationsConfig(destination_subject_group=""))
-    assert s.destination_subject_group is None
+def test_an_empty_destination_group_uses_the_source_site_name():
+    # Every share names its group, so subjects never land in a destination's default group.
+    for empty in ("", "  ", None):
+        s = observation_settings(SOURCE, SyncObservationsConfig(destination_subject_group=empty))
+        assert s.destination_subject_group == "Sitea"
+    named = observation_settings(SOURCE, SyncObservationsConfig(destination_subject_group=" Vultures "))
+    assert named.destination_subject_group == "Vultures"
 
 
 def test_share_toggles_are_titled_for_admins():

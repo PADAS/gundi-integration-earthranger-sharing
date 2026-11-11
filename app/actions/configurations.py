@@ -191,7 +191,7 @@ class SyncObservationsConfig(PullActionConfiguration):
         None,
         title="Destination subject group name",
         description="Shared subjects are added to this group at each destination. "
-                    "Defaults to the source site's name; set it to an empty value to add no group.",
+                    "Leave it empty to use the source site's name.",
     )
     area_feature_groups: List[str] = Field(
         default_factory=list,

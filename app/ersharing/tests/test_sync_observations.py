@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.actions.configurations import AuthenticateConfig, SyncObservationsConfig
-from app.ersharing import sync_observations
+from app.ersharing import reporting, sync_observations
 from app.ersharing.destinations import Destination
 from app.ersharing.state import OBSERVATIONS_ACTION, ShareState
 from app.ersharing.sync_observations import run_sync_observations, select_subjects, subject_marker_key
@@ -56,6 +56,7 @@ def world(monkeypatch):
     monkeypatch.setattr(sync_observations, "publish_report",
                         AsyncMock(side_effect=lambda i, a, r: published.append(r)))
     monkeypatch.setattr(sync_observations, "log_action_activity", AsyncMock())
+    monkeypatch.setattr(reporting, "log_action_activity", AsyncMock())
     monkeypatch.setattr(sync_observations, "trigger_action", AsyncMock())
     monkeypatch.setattr(sync_observations, "utcnow", lambda: NOW)
     return SimpleNamespace(source=source, sites=sites, manager=manager, published=published)
@@ -95,6 +96,19 @@ async def test_shares_valid_points_with_every_destination_once(world):
     await run_sync_observations(INTEGRATION, CONFIG)
     assert points(world.sites["https://site1.pamdas.org"]) == expected  # nothing re-sent
     assert [r.created for r in world.published[:2]] == [3, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_point_never_goes_back_to_a_site_it_came_from(world):
+    # s2's point was shared to sitea by site1, so it goes on to site2 but not back to site1.
+    world.source.observations["s2"] = [observed("src-s2", "2026-10-01T00:00:00Z", details={"sharing_lineage": [
+        "site:site1.pamdas.org#user:svc#subject:s2#rts:20261001000100"]})]
+    await run_sync_observations(INTEGRATION, CONFIG)
+    assert ("s2", "2026-10-01T00:00:00Z") not in points(world.sites["https://site1.pamdas.org"])
+    assert ("s2", "2026-10-01T00:00:00Z") in points(world.sites["https://site2.pamdas.org"])
+    # Held back for good: the marker still moves, so the point isn't read again.
+    marker = await marker_of(world, "d1", "s2")
+    assert marker.since == parse_dt("2026-10-01T00:00:00Z")
 
 
 @pytest.mark.asyncio

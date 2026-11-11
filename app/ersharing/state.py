@@ -72,6 +72,29 @@ class ShareState:
         await self._manager.delete_state(self.integration_id, EVENTS_ACTION,
                                          source_id=f"{destination_id}:event:{src_event_id}")
 
+    async def get_waiting_types(self, destination_id: str) -> Dict[str, datetime]:
+        """Source event types whose events were skipped because the type couldn't be set up
+        at this destination, each with the oldest skipped event's updated_at."""
+        data = await self._manager.get_state(self.integration_id, EVENTS_ACTION,
+                                             source_id=f"{destination_id}:waiting-types")
+        return {value: datetime.fromisoformat(since) for value, since in (data or {}).items()}
+
+    async def set_waiting_types(self, destination_id: str, waiting: Dict[str, datetime]):
+        key = f"{destination_id}:waiting-types"
+        if waiting:
+            await self._manager.set_state(self.integration_id, EVENTS_ACTION,
+                                          {value: since.isoformat() for value, since in waiting.items()},
+                                          source_id=key)
+        else:
+            await self._manager.delete_state(self.integration_id, EVENTS_ACTION, source_id=key)
+
+    async def get_value(self, action_id: str, key: str) -> Optional[str]:
+        data = await self._manager.get_state(self.integration_id, action_id, source_id=key)
+        return data.get("value") if data else None
+
+    async def set_value(self, action_id: str, key: str, value: str):
+        await self._manager.set_state(self.integration_id, action_id, {"value": value}, source_id=key)
+
     async def try_lease(self, action_id: str, ttl_seconds: int) -> bool:
         token = uuid.uuid4().hex
         # JSON-encoded because get_state decodes stored values as JSON.
