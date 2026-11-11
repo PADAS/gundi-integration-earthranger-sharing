@@ -170,7 +170,7 @@ async def test_unfinished_reconcile_resumes_from_its_cursor():
     dest.events["gone1"] = make_event("gone1", first.isoformat(), event_details=provenance("gone1"))
     dest.events["gone2"] = make_event("gone2", second.isoformat(), event_details=provenance("gone2"))
     run = reconcile_run(source)
-    checks = iter([False, True])
+    checks = iter([False, False, True])  # listing the page, gone1, then out of time before gone2
     run.out_of_time = lambda: next(checks)
     report = DestinationReport("Site B", "Events")
     assert await reconcile_destination(run, destination(1), dest, report) is False

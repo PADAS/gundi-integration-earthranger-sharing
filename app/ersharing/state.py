@@ -31,6 +31,7 @@ class EventRecord(BaseModel):
     incidents: List[str] = Field(default_factory=list)          # incident ids linked at the destination
     members: List[str] = Field(default_factory=list)            # incidents: source event ids held, as last checked
     pending: bool = False  # notes, files or incident links still to finish after the event itself was written
+    written_at: Optional[datetime] = None  # updated_at of the source version last written to the copy
 
 
 def _dump(model: BaseModel) -> dict:
@@ -86,6 +87,19 @@ class ShareState:
             await self._manager.set_state(self.integration_id, EVENTS_ACTION,
                                           {value: since.isoformat() for value, since in waiting.items()},
                                           source_id=key)
+        else:
+            await self._manager.delete_state(self.integration_id, EVENTS_ACTION, source_id=key)
+
+    async def get_pending_events(self, destination_id: str) -> List[str]:
+        """Source events whose copy still misses notes, files or incident links."""
+        data = await self._manager.get_state(self.integration_id, EVENTS_ACTION,
+                                             source_id=f"{destination_id}:pending-events")
+        return list((data or {}).get("ids") or [])
+
+    async def set_pending_events(self, destination_id: str, event_ids: List[str]):
+        key = f"{destination_id}:pending-events"
+        if event_ids:
+            await self._manager.set_state(self.integration_id, EVENTS_ACTION, {"ids": sorted(event_ids)}, source_id=key)
         else:
             await self._manager.delete_state(self.integration_id, EVENTS_ACTION, source_id=key)
 

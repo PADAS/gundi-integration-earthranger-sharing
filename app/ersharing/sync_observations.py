@@ -227,7 +227,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
                 complete = False
             if not complete:
                 break
-            marker = advance(marker, batch, now)
+            marker = advance(marker, batch, now, keep_created=True)
             await state.set_marker(OBSERVATIONS_ACTION, key, marker)
         if complete and observations:
             # Points that will never be shared (filtered out) still move the marker, so they aren't re-read.

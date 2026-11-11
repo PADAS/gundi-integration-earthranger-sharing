@@ -171,7 +171,8 @@ class EventTypeSync:
 
     async def _ensure(self, source_value: str) -> dict:
         if self._source_types is None:
-            self._source_types = {t["value"]: t for t in await self._source.list_event_types_v2()}
+            # Inactive types too: events of a type deactivated at the source still get shared.
+            self._source_types = {t["value"]: t for t in await self._source.list_event_types_v2(include_inactive=True)}
         src = self._source_types.get(source_value)
         if src is None:
             return await self._ensure_for_v1_source(source_value)

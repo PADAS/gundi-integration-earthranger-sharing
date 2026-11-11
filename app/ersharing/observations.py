@@ -70,9 +70,11 @@ def read_start(markers: List[Optional[Marker]], fallback: datetime) -> datetime:
     return min(starts)
 
 
-def advance(marker: Optional[Marker], batch: List[dict], now: datetime) -> Marker:
+def advance(marker: Optional[Marker], batch: List[dict], now: datetime, keep_created: bool = False) -> Marker:
+    """keep_created holds the created_at watermark, for a batch sent while later batches of the
+    same window are still to go: late points in them must still count as new if one fails."""
     recorded = max(parse_dt(o["recorded_at"]) for o in batch)
-    created = [parse_dt(o["created_at"]) for o in batch if o.get("created_at")]
+    created = [] if keep_created else [parse_dt(o["created_at"]) for o in batch if o.get("created_at")]
     if marker is not None:
         recorded = max(recorded, marker.since)
         if marker.created_since:

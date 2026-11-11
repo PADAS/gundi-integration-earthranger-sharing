@@ -40,10 +40,23 @@ async def test_an_unfinished_copy_finishes_its_notes_without_rewriting_the_event
     dest = FakeSite()
     event = make_event("e1", "2026-10-01T00:00:00+00:00")
     dest.events["e1"] = {**event, "updated_at": "2026-10-01T00:05:00+00:00"}  # this runner's earlier write
-    record = EventRecord(dest_event_id="e1", updated_at=datetime(1970, 1, 1, tzinfo=timezone.utc), pending=True)
+    record = EventRecord(dest_event_id="e1", updated_at=datetime(1970, 1, 1, tzinfo=timezone.utc), pending=True,
+                         written_at=datetime(2026, 10, 1, tzinfo=timezone.utc))
     result = await _write_event(events_run(), dest, event, {"id": "e1", "title": "x"}, record, DestinationReport("d", "Events"))
     assert result is record
     assert dest.calls_to("patch_event") == []
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_copy_gets_a_newer_source_version_written():
+    dest = FakeSite()
+    event = make_event("e1", "2026-10-01T00:02:00+00:00")
+    dest.events["e1"] = {**event, "updated_at": "2026-10-01T00:05:00+00:00"}  # written from the 00:00 version
+    record = EventRecord(dest_event_id="e1", updated_at=datetime(1970, 1, 1, tzinfo=timezone.utc), pending=True,
+                         written_at=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    result = await _write_event(events_run(), dest, event, {"id": "e1", "title": "x"}, record, DestinationReport("d", "Events"))
+    assert result is record and dest.calls_to("patch_event")
+    assert record.written_at == datetime(2026, 10, 1, 0, 2, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio
@@ -134,3 +147,47 @@ async def test_a_details_update_that_times_out_stops_only_that_destination(monke
     assert list(sites) == ["d2"]
     assert reports["d1"].errors and not reports["d2"].errors
     assert working.calls_to("patch_subject")
+
+
+# --- Round 2 -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_an_unfinished_copy_is_finished_after_the_bookmark_moved_past_it():
+    from app.ersharing.tests.test_sync_events import setup, sync
+    from app.services.errors import IntegrationBadResponseError
+    source, dest, state, run = setup(
+        make_event("e1", "2026-10-01T00:00:00Z", files=[{"id": "f1", "url": "u1", "filename": "a.jpg"}]),
+        make_event("e2", "2026-10-02T00:00:00Z"))
+    source.files["u1"] = b"img"
+    dest.failures["post_file"] = IntegrationBadResponseError("Destination site siteb.pamdas.org: busy", status_code=400)
+    await sync(run, dest)
+    assert await state.get_pending_events("d1") == ["e1"]
+    dest.failures.pop("post_file")
+    run.pending.clear(); run.tried.clear()
+    await sync(run, dest)  # the bookmark is past e1, which is read again by its id
+    assert dest.calls_to("post_file")
+    assert await state.get_pending_events("d1") == []
+    record = await state.get_event_record("d1", "e1")
+    assert not record.pending and record.files.get("f1")
+
+
+@pytest.mark.asyncio
+async def test_event_types_are_loaded_with_inactive_ones():
+    from app.ersharing.event_types import EventTypeSync
+    source = FakeSite(SOURCE_URL, role="source")
+    source.event_types["old"] = {"value": "old", "display": "Old", "category": "monitoring", "is_active": False,
+                                 "schema": {"json": {"properties": {}}, "ui": {}}}
+    types = EventTypeSync(source, FakeSite(), event_settings(SOURCE_URL, SyncEventsConfig()))
+    assert await types.ensure("old") is not None
+    assert source.v2_list_include_inactive is True
+
+
+def test_a_batch_sent_mid_window_keeps_the_created_watermark():
+    from app.ersharing.observations import advance, is_new
+    from app.ersharing.state import Marker
+    six = datetime(2026, 10, 1, 6, tzinfo=timezone.utc)
+    marker = Marker(since=six, advanced_at=six, created_since=six)
+    late = lambda minute: {"recorded_at": f"2026-10-01T05:{minute:02d}:00Z", "created_at": "2026-10-01T07:00:00Z"}
+    sent = advance(marker, [late(1), late(2)], six, keep_created=True)
+    assert sent.created_since == six
+    assert is_new(late(3), sent)  # still new if the later batch failed

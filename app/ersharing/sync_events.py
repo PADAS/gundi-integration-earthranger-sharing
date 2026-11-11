@@ -1,9 +1,9 @@
 """sync_events: mirror source events onto each destination (spec §7)."""
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Optional
+from typing import Dict, Optional, Set
 
 from gundi_core.events import LogLevel
 from redis.exceptions import RedisError
@@ -45,6 +45,8 @@ class EventsRun:
     area: Optional[Area]
     state: ShareState
     deadline: float  # time.monotonic() value
+    pending: Dict[str, Set[str]] = field(default_factory=dict)  # per destination, copies still unfinished
+    tried: Dict[str, Set[str]] = field(default_factory=dict)    # per destination, events handled this run
 
     def out_of_time(self) -> bool:
         return time.monotonic() > self.deadline
@@ -61,6 +63,8 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
     types = EventTypeSync(run.source, dest, run.settings)
     types.waiting = await run.state.get_waiting_types(destination.id)
     waiting_before = dict(types.waiting)
+    pending = run.pending[destination.id] = set(await run.state.get_pending_events(destination.id))
+    pending_before = set(pending)
     try:
         async for page in run.source.iter_events_updated_since(since):
             for event in page:
@@ -70,6 +74,7 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
                 await _sync_event(run, destination, dest, types, event, report)
                 since = max(since, parse_dt(event["updated_at"]))
         await catch_up_waiting_types(run, destination, dest, types, report)
+        await finish_pending_copies(run, destination, dest, types, report, pending_before)
     finally:
         # Events arrive oldest first, so `since` is the last fully handled update.
         if marker is None or since != marker.since:
@@ -78,6 +83,8 @@ async def sync_destination(run: EventsRun, destination: Destination, dest, repor
         report.marker = since
         if types.waiting != waiting_before:
             await run.state.set_waiting_types(destination.id, types.waiting)
+        if pending != pending_before:
+            await run.state.set_pending_events(destination.id, list(pending))
     await sync_incident_links(run, destination, dest, report)
 
 
@@ -108,15 +115,49 @@ async def catch_up_waiting_types(run: EventsRun, destination: Destination, dest,
         types.waiting.pop(value, None)
 
 
+async def finish_pending_copies(run: EventsRun, destination: Destination, dest, types: EventTypeSync,
+                                report: DestinationReport, carried_over: Set[str]) -> None:
+    """Finish copies left unfinished by an earlier run. The bookmark may have moved past
+    their event, so each is read again by its id; events already handled in this run wait."""
+    pending = run.pending.get(destination.id) or set()
+    tried = run.tried.get(destination.id) or set()
+    for event_id in sorted((carried_over & pending) - tried):
+        if run.out_of_time():
+            report.timed_out = True
+            return
+        try:
+            event = await run.source.get_event(event_id, with_notes_and_files=True)
+        except IntegrationError as e:
+            if halts_site(e):
+                raise
+            continue  # tried again next run
+        if event is None:
+            pending.discard(event_id)  # gone at the source; the daily check handles the copy
+            continue
+        await _sync_event(run, destination, dest, types, event, report)
+
+
+def incident_cursor_key(destination_id: str) -> str:
+    return f"{destination_id}:incident-cursor"
+
+
 async def sync_incident_links(run: EventsRun, destination: Destination, dest, report: DestinationReport) -> None:
     """Adding an event to an incident, or removing it, at the source changes neither event's
     updated_at, so the events held by recent incidents are compared on every run (spec §7.5)."""
-    async for page in run.source.iter_events_updated_since(utcnow() - INCIDENT_LINKS_WINDOW,
-                                                           with_notes_and_files=False, incidents_only=True):
+    # A scan cut short by the time budget resumes where it stopped, so a long window is
+    # covered across runs instead of restarting at its beginning every time.
+    key = incident_cursor_key(destination.id)
+    window_start = utcnow() - INCIDENT_LINKS_WINDOW
+    cursor = await run.state.get_marker(EVENTS_ACTION, key)
+    checked = max(window_start, cursor.since) if cursor else window_start
+    async for page in run.source.iter_events_updated_since(checked, with_notes_and_files=False, incidents_only=True):
         for incident in page:
             if run.out_of_time():
                 report.timed_out = True
+                await run.state.set_marker(EVENTS_ACTION, key, Marker(since=checked, advanced_at=utcnow()))
                 return
+            if incident.get("updated_at"):
+                checked = max(checked, parse_dt(incident["updated_at"]))
             incident_id = incident["id"]
             incident_record = await run.state.get_event_record(destination.id, incident_id)
             if incident_record is None:
@@ -133,6 +174,7 @@ async def sync_incident_links(run: EventsRun, destination: Destination, dest, re
             if incident_record.members != members:
                 incident_record.members = members
                 await run.state.set_event_record(destination.id, incident_id, incident_record)
+    await run.state.delete_marker(EVENTS_ACTION, key)
 
 
 FOREIGN_COPY = "Some events weren't copied because the destination already has them from another site."
@@ -143,6 +185,7 @@ NOT_CHECKED = "Some copies weren't checked for removal because the source site d
 
 
 async def _sync_event(run, destination, dest, types, event, report):
+    run.tried.setdefault(destination.id, set()).add(str(event.get("id")))
     try:
         await _copy_event(run, destination, dest, types, event, report)
     except IntegrationError as e:
@@ -195,6 +238,11 @@ async def _copy_event(run, destination, dest, types, event, report):
     finally:
         # Saved on failure too so copied notes aren't re-posted; the old updated_at keeps the event due.
         record.pending = not complete
+        unfinished = run.pending.setdefault(destination.id, set())
+        if complete:
+            unfinished.discard(str(event["id"]))
+        else:
+            unfinished.add(str(event["id"]))
         if complete:
             record.updated_at = parse_dt(event["updated_at"])
         await run.state.set_event_record(destination.id, event["id"], record)
@@ -210,21 +258,25 @@ async def _write_event(run: EventsRun, dest, event: dict, copy: dict, record: Op
         # Never copied, or deleted at the destination: create it.
         created = await dest.post_event(copy)
         report.created += 1
-        return EventRecord(dest_event_id=str(created["id"]), updated_at=EPOCH)
+        return EventRecord(dest_event_id=str(created["id"]), updated_at=EPOCH, written_at=parse_dt(event["updated_at"]))
     if record is None and not is_copy_of(existing, event["id"], run.source.url, run.settings.source.value):
         return None
     if dest_is_newer(existing, event):
-        if record is not None and record.pending:
-            # The newer copy is this runner's own earlier write, whose notes, files or links
-            # didn't all land: finish those without rewriting the event.
+        if record is None or not record.pending:
+            return DEST_IS_NEWER
+        # The newer copy is this runner's own earlier write, whose notes, files or links
+        # didn't all land. Same source version: finish those without rewriting the event.
+        # A newer source version since then is written as usual.
+        if record.written_at is not None and record.written_at == parse_dt(event["updated_at"]):
             return record
-        return DEST_IS_NEWER
     changes = {k: v for k, v in copy.items() if k != "id"}
     # clean_event leaves out an empty title; on an update that would keep the old one.
     changes.setdefault("title", "")
     await dest.patch_event(existing["id"], changes)
     report.updated += 1
-    return record or adopt_record(event, existing)
+    record = record or adopt_record(event, existing)
+    record.written_at = parse_dt(event["updated_at"])
+    return record
 
 
 RECONCILE_EVERY_SECONDS = 24 * 60 * 60
@@ -248,13 +300,19 @@ async def reconcile_destination(run: EventsRun, destination: Destination, dest, 
     checked = cursor.since if cursor else utcnow() - RECONCILE_WINDOW
     finished = False
     try:
+        # Listed in full before anything is deleted: deleting while paging by number would
+        # shift later copies onto pages already read, and they'd be missed.
+        copies = []
         async for page in dest.iter_events_updated_since(checked, with_notes_and_files=False):
-            for copy in page:
-                if run.out_of_time():
-                    return False
-                await _reconcile_copy(run, destination, dest, copy, report)
-                if copy.get("updated_at"):
-                    checked = max(checked, parse_dt(copy["updated_at"]))
+            if run.out_of_time():
+                return False
+            copies.extend(page)
+        for copy in copies:
+            if run.out_of_time():
+                return False
+            await _reconcile_copy(run, destination, dest, copy, report)
+            if copy.get("updated_at"):
+                checked = max(checked, parse_dt(copy["updated_at"]))
         finished = True
         return True
     finally:
