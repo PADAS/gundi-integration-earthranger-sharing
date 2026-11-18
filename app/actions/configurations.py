@@ -105,7 +105,8 @@ OBSERVATIONS_V1_KEYS = {
 # v1 state keys with no form field are kept in the config as they are, except
 # these. Dropped: v1's own run status and sync window, which v2 doesn't read.
 # Masked: kept, but saved as "*******" so the secret never reaches the config.
-EVENTS_V1_DROP = ["days_to_sync", "error", "last_run", "last_successful_run", "warning"]
+# dest_endpoint is dropped: destinations come from the connection, not from the share's settings.
+EVENTS_V1_DROP = ["days_to_sync", "dest_endpoint", "error", "last_run", "last_successful_run", "warning"]
 OBSERVATIONS_V1_DROP = ["batch_size", "error", "last_run", "last_successful_run", "look_back_window_hours",
                         "schedule_interval_minutes"]
 V1_MASK = ["dest_token"]
@@ -199,7 +200,9 @@ class SyncObservationsConfig(PullActionConfiguration):
         description="Only share points inside these feature groups. Leave empty to share points anywhere.",
     )
     start_from: Optional[datetime] = Field(
-        None, title="Start from", description="Where the first sync starts when no progress is recorded yet."
+        None, title="Start from",
+        description="For a subject's first sync only: shares points recorded after this time, "
+                    "within the last 12 hours. An earlier time has no effect.",
     )
     compatibility: ObservationsCompatibility = Field(
         default_factory=ObservationsCompatibility, title="Advanced (v1 compatibility)"
@@ -223,7 +226,7 @@ class SyncObservationsConfig(PullActionConfiguration):
 
 
 class ListEventTypesQuery(ReferenceActionConfiguration):
-    """The source site's active v2 event types."""
+    """The source site's active event types, v2 and v1."""
 
 
 class ListSubjectGroupsQuery(ReferenceActionConfiguration):

@@ -20,7 +20,7 @@ from .modes import observation_settings
 from .naming import site_host
 from .observations import (
     add_lineage, advance, build_payload, has_valid_location, in_assignment, is_new, parse_assignments,
-    passed_through, point_batches, read_start,
+    passed_through, point_batches, read_start, OVERLAP, SHORT_OVERLAP,
 )
 from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
 from .state import OBSERVATIONS_ACTION, Marker, ShareState
@@ -43,6 +43,9 @@ ALL_REJECTED = "Some track points weren't shared because the destination turned 
 DETAILS_NOT_UPDATED = "Some subjects' details weren't updated because the destination didn't accept the change."
 # How often subject and device details are compared with what was last sent to each destination.
 DETAILS_CHECK_EVERY_SECONDS = 24 * 60 * 60
+# A subject is re-read from 12 hours before its marker once an hour, for points that arrive
+# late; in the runs in between only from just before the marker.
+FULL_REREAD_EVERY_SECONDS = 60 * 60
 
 
 def subject_marker_key(destination_id: str, subject_id: str) -> str:
@@ -65,10 +68,19 @@ async def select_subjects(source, group_ids: FrozenSet[str]) -> List[dict]:
 
 
 async def _load_assignments(source, subject_ids: List[str]):
-    raw = []
+    """Device assignments by subject, and the subjects whose assignments couldn't be read.
+    A chunk that fails on its own is skipped, as v1 skipped the subject; site-wide trouble
+    (credentials, reachability, server errors) still stops the run."""
+    raw, unread = [], {}
     for i in range(0, len(subject_ids), SUBJECT_ID_CHUNK):
-        raw.extend(await source.get_source_assignments(subject_ids[i:i + SUBJECT_ID_CHUNK]))
-    return parse_assignments(raw)
+        chunk = subject_ids[i:i + SUBJECT_ID_CHUNK]
+        try:
+            raw.extend(await source.get_source_assignments(chunk))
+        except IntegrationError as e:
+            if halts_site(e):
+                raise
+            unread.update({subject_id: e for subject_id in chunk})
+    return parse_assignments(raw), unread
 
 
 async def run_sync_observations(integration, config) -> dict:
@@ -113,7 +125,7 @@ async def _run(integration, config, state: ShareState):
                     reports[d.id].error(e.message)
             area = await load_area(source, share.area_feature_groups, polygons_only=True)
             subjects = await select_subjects(source, share.subject_groups)
-            assignments = await _load_assignments(source, [str(s["id"]) for s in subjects])
+            assignments, unread = await _load_assignments(source, [str(s["id"]) for s in subjects])
             src_user = share.src_user or (await source.get_me()).get("username", "")
             now = utcnow()
             prefix = f"site:{site_host(source.url)}#user:{src_user}"
@@ -125,6 +137,10 @@ async def _run(integration, config, state: ShareState):
                     continue
                 if not sites:
                     break
+                if subject_id in unread:
+                    _source_failed(unread[subject_id], sites, reports, subject.get("name") or subject_id)
+                    last = subject_id
+                    continue
                 finished = time.monotonic() <= deadline and await _share_subject(
                     source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
                     deadline)
@@ -184,21 +200,14 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
     markers = {d_id: await state.get_marker(OBSERVATIONS_ACTION, subject_marker_key(d_id, subject_id))
                for d_id in sites}
     backfill_from = now - BACKFILL
+    full_reread = await state.once_per(OBSERVATIONS_ACTION, f"reread:{subject_id}", FULL_REREAD_EVERY_SECONDS)
     start = read_start(list(markers.values()),
-                       max(parse_dt(share.start_from), backfill_from) if share.start_from else backfill_from)
+                       max(parse_dt(share.start_from), backfill_from) if share.start_from else backfill_from,
+                       OVERLAP if full_reread else SHORT_OVERLAP)
     try:
         observations = await source.get_observations(subject_id, start)
-        source_additional = {}
-        if share.subject_additional:
-            source_additional = {str(s.get("id")): s.get("additional") or {}
-                                 for s in await source.get_subject_sources(subject_id)}
     except IntegrationError as e:
-        denied = e.status_code == 403
-        if halts_site(e) and not denied:
-            raise
-        for d_id in sites:
-            reports[d_id].error(SOURCE_DENIED if denied else SOURCE_FAILED, item=f"{label}: {e.message}")
-        return True
+        return _source_failed(e, sites, reports, label)
 
     candidates = sorted(
         (o for o in observations
@@ -207,14 +216,27 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
          and (area is None or area.contains_point(o["location"]["longitude"], o["location"]["latitude"]))),
         key=lambda o: parse_dt(o["recorded_at"]),
     )
+    to_send = {d_id: [o for o in candidates if is_new(o, markers[d_id]) and not passed_through(o, site_host(dest.url))]
+               for d_id, dest in sites.items()}
+    details_key = {d_id: f"{d_id}:details-check:{subject_id}" for d_id in sites}
+    details_due = {d_id: share.subject_additional and markers[d_id] is not None
+                   and await state.is_due(OBSERVATIONS_ACTION, details_key[d_id]) for d_id in sites}
+    source_additional = {}
+    # The subject's devices are read only when something will use them.
+    if share.subject_additional and (any(to_send.values()) or any(details_due.values())):
+        try:
+            source_additional = {str(s.get("id")): s.get("additional") or {}
+                                 for s in await source.get_subject_sources(subject_id)}
+        except IntegrationError as e:
+            return _source_failed(e, sites, reports, label)
+
     fingerprint = f"{prefix}#subject:{subject_id}#rts:{now:%Y%m%d%H%M%S}"
     finished = True
     for d_id, dest in list(sites.items()):
         key = subject_marker_key(d_id, subject_id)
         marker = markers[d_id]
         complete = True
-        host = site_host(dest.url)
-        for batch in point_batches([o for o in candidates if is_new(o, marker) and not passed_through(o, host)]):
+        for batch in point_batches(to_send[d_id]):
             if time.monotonic() > deadline:
                 complete = finished = False
                 break
@@ -235,21 +257,31 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             if moved != marker:
                 marker = moved
                 await state.set_marker(OBSERVATIONS_ACTION, key, marker)
-        if (share.subject_additional and marker is not None and d_id in sites
-                and await state.once_per(OBSERVATIONS_ACTION, f"{d_id}:details-check:{subject_id}",
-                                         DETAILS_CHECK_EVERY_SECONDS)):
+        if details_due[d_id] and d_id in sites:
             try:
-                await _refresh_details(dest, d_id, state, subject, source_additional, reports[d_id], label)
+                checked = await _refresh_details(dest, d_id, state, subject, source_additional, reports[d_id], label)
             except IntegrationError as e:
                 # Like a failed point send: this destination stops for the run, the others go on.
                 reports[d_id].error(e.message)
                 del sites[d_id]
+                checked = False
+            if checked:  # the daily gate is taken only once the check is done
+                await state.once_per(OBSERVATIONS_ACTION, details_key[d_id], DETAILS_CHECK_EVERY_SECONDS)
         if marker is not None:
             current = reports[d_id].marker
             reports[d_id].marker = marker.since if current is None else max(current, marker.since)
             if d_id not in freshest or marker.advanced_at > freshest[d_id].advanced_at:
                 freshest[d_id] = marker
     return finished
+
+
+def _source_failed(error: IntegrationError, sites, reports, label: str) -> bool:
+    denied = error.status_code == 403
+    if halts_site(error) and not denied:
+        raise error
+    for d_id in sites:
+        reports[d_id].error(SOURCE_DENIED if denied else SOURCE_FAILED, item=f"{label}: {error.message}")
+    return True
 
 
 class _WholeBatchRejected(Exception):
@@ -375,8 +407,14 @@ async def _refresh_details(dest, destination_id: str, state, subject: dict, sour
     digest = hashlib.sha1(json.dumps({"subject": subject_details, "sources": source_additional},
                                      sort_keys=True, default=str).encode()).hexdigest()
     key = f"{destination_id}:details:{subject_id}"
-    if await state.get_value(OBSERVATIONS_ACTION, key) == digest:
-        return
+    stored = await state.get_value(OBSERVATIONS_ACTION, key)
+    if stored == digest:
+        return True
+    if stored is None:
+        # First check for this subject at this destination: what it has now is taken as the
+        # starting point, so values a destination admin set aren't overwritten at cutover.
+        await state.set_value(OBSERVATIONS_ACTION, key, digest)
+        return True
     try:
         await dest.patch_subject(subject_id, {"additional": subject_details})
         for copy in await dest.get_subject_sources(subject_id):
@@ -385,9 +423,10 @@ async def _refresh_details(dest, destination_id: str, state, subject: dict, sour
                 await dest.patch_source(str(copy["id"]), {"additional": details})
     except IntegrationError as e:
         if e.status_code == 404:
-            return  # not at the destination (yet)
+            return False  # not at the destination yet; checked again next run
         if halts_site(e) and e.status_code != 403:
             raise
         report.error(DETAILS_NOT_UPDATED, item=f"{label}: {e.message}", level=LogLevel.WARNING)
-        return
+        return True  # turned down: checked again tomorrow, not every run
     await state.set_value(OBSERVATIONS_ACTION, key, digest)
+    return True

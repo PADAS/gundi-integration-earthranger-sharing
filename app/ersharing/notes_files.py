@@ -87,6 +87,30 @@ def adopt_record(src_event: dict, dest_event: dict) -> EventRecord:
     return record
 
 
+def adopt_unrecorded(record: EventRecord, src_event: dict, dest_event: dict) -> None:
+    """Record notes and files that already reached an unfinished copy without being recorded
+    (a post that timed out after the destination saved it), matched by text and filename
+    as adopt_record does, so they aren't posted a second time."""
+    used_notes = {rec.dest_id for rec in record.notes.values()}
+    unused_notes = [d for d in dest_event.get("notes") or [] if str(d.get("id")) not in used_notes]
+    for note in src_event.get("notes") or []:
+        if str(note["id"]) in record.notes:
+            continue
+        match = next((d for d in unused_notes if d.get("text") == note.get("text")), None)
+        if match:
+            unused_notes.remove(match)
+            record.notes[str(note["id"])] = NoteRecord(dest_id=str(match["id"]), digest=note_digest(note.get("text")))
+    used_files = set(record.files.values())
+    unused_files = [d for d in dest_event.get("files") or [] if str(d.get("id")) not in used_files]
+    for file in src_event.get("files") or []:
+        if str(file["id"]) in record.files:
+            continue
+        match = next((d for d in unused_files if d.get("filename") == file.get("filename")), None)
+        if match:
+            unused_files.remove(match)
+            record.files[str(file["id"])] = str(match["id"])
+
+
 async def _ignore_404(awaitable):
     try:
         return await awaitable

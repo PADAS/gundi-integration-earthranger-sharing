@@ -178,6 +178,12 @@ class EventTypeSync:
             return await self._ensure_for_v1_source(source_value)
         wanted = clean_event_type(src, self._s)
         existing = await self._dest.get_event_type_v2(wanted["value"])
+        if existing is None:
+            # The v2 API can't address a v1 type, so a destination that still has this value
+            # as a v1 type is shared into as it is, as v1 sharing did.
+            v1_type = await self._dest_v1_type(wanted["value"])
+            if v1_type is not None:
+                return v1_type
         if not self._s.update_schema:
             if existing is None or not has_provenance_fields(existing):
                 raise IntegrationConfigurationError(
@@ -209,11 +215,15 @@ class EventTypeSync:
             schema = add_provenance_fields_to_v2_schema(copy.deepcopy(_as_schema(existing.get("schema")) or {}))
             await self._dest.patch_event_type_v2({"value": dest_value, "schema": json.dumps(schema, indent=4)})
             return {**existing, "schema": schema}
+        v1_type = await self._dest_v1_type(dest_value)
+        if v1_type is not None:
+            return v1_type
+        return await self._create_v2_from_v1_source(source_value, dest_value)
+
+    async def _dest_v1_type(self, dest_value: str) -> Optional[dict]:
         if self._dest_v1_types is None:
             self._dest_v1_types = {t["value"]: t for t in await self._dest.list_event_types_v1()}
-        if dest_value in self._dest_v1_types:
-            return self._dest_v1_types[dest_value]
-        return await self._create_v2_from_v1_source(source_value, dest_value)
+        return self._dest_v1_types.get(dest_value)
 
     async def _create_v2_from_v1_source(self, source_value: str, dest_value: str) -> dict:
         """The destination has no such type, and v1 types can't be created any more, so a

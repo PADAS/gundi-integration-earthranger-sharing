@@ -141,6 +141,7 @@ async def test_a_details_update_that_times_out_stops_only_that_destination(monke
     now = datetime(2026, 10, 2, tzinfo=timezone.utc)
     for d_id in sites:
         await state.set_marker(OBSERVATIONS_ACTION, f"{d_id}:subject:s1", Marker(since=now, advanced_at=now))
+        await state.set_value(OBSERVATIONS_ACTION, f"{d_id}:details:s1", "digest of an earlier check")
     finished = await sync_observations._share_subject(source, sites, reports, {}, state, share, None, {}, subject,
                                                       "site:sitea.pamdas.org#user:svc", now)
     assert finished is True
@@ -227,3 +228,49 @@ async def test_the_revisit_lists_are_saved_before_the_bookmark():
         setattr(state, name, record)
     await sync(run, dest)
     assert writes.index("set_waiting_types") < writes.index("set_marker")
+
+
+# --- Chris's review ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_lease_manager_sets_and_deletes_by_value_without_touching_the_template(monkeypatch):
+    from app.ersharing.state import LeaseStateManager
+
+    class Redis:
+        def __init__(self):
+            self.calls = []
+
+        async def set(self, *args, **kwargs):
+            self.calls.append(("set", args, kwargs))
+            return True
+
+        async def eval(self, *args):
+            self.calls.append(("eval", args))
+            return 1
+
+    manager = LeaseStateManager.__new__(LeaseStateManager)
+    manager.db_client = Redis()
+    assert await manager.set_if_absent("i1", "sync_events", ttl_seconds=60, source_id="lease", value='"tok"')
+    assert manager.db_client.calls[0] == ("set", ("integration_state.i1.sync_events.lease", '"tok"'),
+                                          {"ex": 60, "nx": True})
+    assert await manager.delete_if_equal("i1", "sync_events", '"tok"', source_id="lease") is True
+    _, (script, numkeys, key, value) = manager.db_client.calls[1]
+    assert (numkeys, key, value) == (1, "integration_state.i1.sync_events.lease", '"tok"')
+    assert "GET" in script and "DEL" in script
+
+
+def test_the_earthranger_access_module_is_free_of_gundi_code():
+    import ast
+    import inspect
+    from app.ersharing import er_site
+    imported = {n.module for n in ast.walk(ast.parse(inspect.getsource(er_site)))
+                if isinstance(n, ast.ImportFrom) and n.module}
+    assert not any(m.startswith(("app.services", "app.actions")) for m in imported)
+    assert "with_retries" not in inspect.getsource(er_site)
+
+
+def test_reads_wait_60_seconds_by_default():
+    from app.actions.configurations import AuthenticateConfig
+    client = clients.build_er_client("https://siteb.pamdas.org", AuthenticateConfig(token="t"))
+    assert clients.DATA_TIMEOUT_SECONDS == 60.0
+    assert client._http_session.timeout.read == 60.0 and client._http_session.timeout.connect == 10.0

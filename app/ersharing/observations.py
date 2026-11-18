@@ -10,7 +10,8 @@ from .timeutil import parse_dt
 MAX_BATCH = 200
 # Re-read this far behind each marker so points that reach the source late
 # (recorded earlier, uploaded later) are still found; is_new() drops repeats.
-OVERLAP = timedelta(hours=12)
+OVERLAP = timedelta(hours=12)  # how far before its marker a subject is re-read, once an hour
+SHORT_OVERLAP = timedelta(minutes=5)  # how far before its marker it is read in the runs in between
 
 
 def has_valid_location(obs: dict) -> bool:
@@ -63,8 +64,8 @@ def is_new(obs: dict, marker: Optional[Marker]) -> bool:
     return parse_dt(created) > marker.created_since
 
 
-def read_start(markers: List[Optional[Marker]], fallback: datetime) -> datetime:
-    starts = [m.since - OVERLAP for m in markers if m is not None]
+def read_start(markers: List[Optional[Marker]], fallback: datetime, overlap: timedelta = OVERLAP) -> datetime:
+    starts = [m.since - overlap for m in markers if m is not None]
     if not markers or any(m is None for m in markers):
         starts.append(fallback)
     return min(starts)

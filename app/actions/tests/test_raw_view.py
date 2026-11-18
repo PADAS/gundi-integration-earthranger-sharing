@@ -47,7 +47,7 @@ def test_observations_raw_view_maps_v1_keys():
 
 def test_events_raw_view_drops_v1_run_status_and_masks_the_token():
     raw = SyncEventsConfig.ui_schema()["gundi:raw_view"]
-    assert raw["drop"] == ["days_to_sync", "error", "last_run", "last_successful_run", "warning"]
+    assert raw["drop"] == ["days_to_sync", "dest_endpoint", "error", "last_run", "last_successful_run", "warning"]
     assert raw["mask"] == ["dest_token"]
 
 

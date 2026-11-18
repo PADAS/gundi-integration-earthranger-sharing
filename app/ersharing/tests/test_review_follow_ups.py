@@ -227,6 +227,7 @@ async def test_changed_details_are_sent_once_and_then_left_alone():
     state = ShareState("i1", manager=InMemoryStateManager())
     subject = {"id": "s1", "name": "Kali", "additional": {"sex": "female"}}
     report = DestinationReport("Site B", "Tracks")
+    await state.set_value(OBSERVATIONS_ACTION, "d1:details:s1", "digest of an earlier check")
     for _ in range(2):
         await _refresh_details(dest, "d1", state, subject, {"src-1": {"collar": "new"}}, report, "Kali")
     assert dest.calls_to("patch_subject") == [("s1", {"additional": {"sex": "female"}})]
@@ -245,7 +246,8 @@ async def test_a_destination_that_wont_change_subjects_gets_a_warning_and_tracks
         "Destination site x: EarthRanger denied access with these credentials", status_code=403)
     state = ShareState("i1", manager=InMemoryStateManager())
     report = DestinationReport("Site B", "Tracks")
+    await state.set_value(OBSERVATIONS_ACTION, "d1:details:s1", "digest of an earlier check")
     await _refresh_details(dest, "d1", state, {"id": "s1", "additional": {"a": 1}}, {}, report, "Kali")
     assert DETAILS_NOT_UPDATED in report.errors
     # Not recorded as sent, so the next daily check tries again.
-    assert await state.get_value(OBSERVATIONS_ACTION, "d1:details:s1") is None
+    assert await state.get_value(OBSERVATIONS_ACTION, "d1:details:s1") == "digest of an earlier check"
