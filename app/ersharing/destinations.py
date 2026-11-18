@@ -2,7 +2,7 @@
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from gundi_client_v2 import GundiClient
 from pydantic import ValidationError
@@ -22,6 +22,9 @@ class Destination:
     name: str
     url: str
     auth: AuthenticateConfig
+    # The route's field mapping for this destination's track points, as the routing service
+    # applies it to other connections: kept from v1 so points land on the same devices.
+    provider_key: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,39 @@ def _missing_credentials(credentials: AuthenticateConfig) -> str:
     return ""
 
 
+PROVIDER_KEY_FIELD = "provider_key"
+OBSERVATIONS_STREAM = "obv"
+
+
+def provider_keys_from(field_mappings: dict, connection_id: str) -> Dict[str, str]:
+    """Provider key per destination from a route's field mappings, shaped
+    {provider: {stream type: {destination: rule}}}. Only a fixed key (the rule's
+    `default`) applies here: these points carry no provider field to map from."""
+    by_destination = ((field_mappings or {}).get(str(connection_id)) or {}).get(OBSERVATIONS_STREAM) or {}
+    keys = {}
+    for destination_id, rule in by_destination.items():
+        if (isinstance(rule, dict) and rule.get("destination_field") == PROVIDER_KEY_FIELD
+                and isinstance(rule.get("default"), str) and rule["default"].strip()):
+            keys[str(destination_id)] = rule["default"].strip()
+    return keys
+
+
+async def _route_provider_keys(client, connection, connection_id: str) -> Dict[str, str]:
+    """Provider keys set as field mappings on the connection's routes. A route that can't
+    be read leaves its destinations on the share's own provider key."""
+    keys: Dict[str, str] = {}
+    for rule in getattr(connection, "routing_rules", None) or []:
+        route_id = getattr(rule, "id", None) or (rule.get("id") if isinstance(rule, dict) else rule)
+        try:
+            route = await client.get_route_details(route_id)
+        except Exception:
+            logger.exception("Could not read route %s from Gundi", route_id)
+            continue
+        data = getattr(getattr(route, "configuration", None), "data", None) or {}
+        keys.update(provider_keys_from(data.get("field_mappings") or {}, connection_id))
+    return keys
+
+
 @asynccontextmanager
 async def _gundi_client(client):
     if client is not None:
@@ -64,6 +100,7 @@ async def resolve_destinations(connection_id: str, source_url: str, gundi=None
     destinations, skipped = [], []
     async with _gundi_client(gundi) as client:
         connection = await client.get_connection_details(connection_id)
+        provider_keys = await _route_provider_keys(client, connection, connection_id)
         for item in connection.destinations or []:
             item_id, name = str(item.id), item.name or str(item.id)
             type_value = item.type.value if item.type else ""
@@ -104,5 +141,5 @@ async def resolve_destinations(connection_id: str, source_url: str, gundi=None
             if missing:
                 skipped.append(SkippedDestination(item_id, name, missing))
                 continue
-            destinations.append(Destination(item_id, name, url, credentials))
+            destinations.append(Destination(item_id, name, url, credentials, provider_keys.get(item_id)))
     return destinations, skipped

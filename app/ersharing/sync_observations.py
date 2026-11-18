@@ -5,7 +5,7 @@ import logging
 import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
-from typing import Dict, FrozenSet, List
+from typing import Dict, FrozenSet, List, Optional
 
 from gundi_core.events import LogLevel
 
@@ -112,6 +112,7 @@ async def _run(integration, config, state: ShareState):
         return {"destinations": []}, False
 
     reports = {d.id: DestinationReport(destination=d.name, kind="Tracks") for d in destinations}
+    provider_keys = {d.id: d.provider_key for d in destinations if d.provider_key}
     freshest: Dict[str, Marker] = {}  # per destination, the subject marker that moved most recently
     try:
         async with AsyncExitStack() as stack:
@@ -143,7 +144,7 @@ async def _run(integration, config, state: ShareState):
                     continue
                 finished = time.monotonic() <= deadline and await _share_subject(
                     source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
-                    deadline)
+                    deadline, provider_keys)
                 if not finished:
                     # Out of time: the next run starts again at this subject; its sent batches
                     # already moved its markers, so nothing is sent twice.
@@ -192,7 +193,7 @@ async def _progress_marker(state: ShareState, destination_id: str, freshest, rep
 
 
 async def _share_subject(source, sites, reports, freshest, state, share, area, assignments, subject, prefix, now,
-                         deadline: float = float("inf")) -> bool:
+                         deadline: float = float("inf"), provider_keys: Optional[Dict[str, str]] = None) -> bool:
     """Share one subject's new points with every destination. False when the run ran out
     of time part-way, so the caller resumes at this subject next time."""
     subject_id = str(subject["id"])
@@ -242,7 +243,9 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
                 break
             payloads = [add_lineage(build_payload(subject, o, share, source_additional), fingerprint) for o in batch]
             try:
-                complete = await _send(dest, share.provider_key, payloads, reports[d_id], label)
+                # The route's field mapping for this destination wins over the share's own setting.
+                provider_key = (provider_keys or {}).get(d_id) or share.provider_key
+                complete = await _send(dest, provider_key, payloads, reports[d_id], label)
             except IntegrationError as e:
                 reports[d_id].error(e.message)
                 del sites[d_id]
