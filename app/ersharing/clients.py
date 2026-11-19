@@ -123,8 +123,8 @@ def auth_config_of(configurations) -> AuthenticateConfig:
 
 
 def source_url_of(integration, auth: AuthenticateConfig) -> str:
-    """The source site's URL: the auth form's base URL, else the integration's own."""
-    return auth.base_url or integration.base_url
+    """The source site's URL: the connection's own, as for the earth_ranger type."""
+    return integration.base_url
 
 
 def translate(site: "er_site.ERSite", exc: Exception) -> IntegrationError:

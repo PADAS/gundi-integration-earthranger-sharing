@@ -232,6 +232,10 @@ class FakeSite:
         self.v2_list_include_inactive = include_inactive
         return copy.deepcopy(list(self.event_types.values()))
 
+    async def get_subject_groups(self, *, flat):
+        self._hit("get_subject_groups", flat)
+        return copy.deepcopy(self.subject_groups)
+
     async def list_event_types_v1(self):
         self._hit("list_event_types_v1")
         return copy.deepcopy(list(self.event_types_v1.values()))

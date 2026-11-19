@@ -317,6 +317,10 @@ class ERSite:
         results = data if isinstance(data, list) else data.get("data", data)
         return results[0] if isinstance(results, list) and results else None
 
+    async def get_subject_groups(self, *, flat: bool) -> List[dict]:
+        """Subject groups with their subjects; nested (with subgroups) unless `flat`."""
+        return _results(await self._call(lambda: self._client.get_subjectgroups(flat=flat)))
+
     async def list_subject_groups(self) -> List[dict]:
         return _results(await self._call(
             lambda: self._client.get_subjectgroups(include_inactive=False, include_hidden=True, flat=True)

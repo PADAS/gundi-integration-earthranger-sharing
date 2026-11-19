@@ -29,7 +29,7 @@ def source(monkeypatch):
 def test_all_actions_are_registered():
     assert sorted(action_handlers) == [
         "auth", "list_event_types", "list_feature_groups", "list_subject_groups",
-        "preview_events_share", "preview_subjects_share", "sync_events", "sync_observations",
+        "preview_events_share", "preview_subjects_share", "show_permissions", "sync_events", "sync_observations",
     ]
 
 
@@ -44,7 +44,8 @@ def test_sharing_actions_have_portal_names_and_descriptions():
 @pytest.mark.asyncio
 async def test_auth_reports_capabilities(source):
     result = await handlers.action_auth(INTEGRATION, AuthenticateConfig(token="t"))
-    assert result == {"valid_credentials": True, "capabilities": {"events": True, "subject_tracks": True}}
+    assert result == {"valid_credentials": True, "capabilities": {"events": True, "subject_tracks": True},
+                      "connected_as": "svc"}
 
 
 @pytest.mark.asyncio
@@ -108,3 +109,47 @@ async def test_preview_actions_read_the_source_with_the_form_selection(source):
     subjects = await handlers.action_preview_subjects_share(
         INTEGRATION, PreviewSubjectsShareQuery.parse_obj({"subject_groups": ["g2"], "compatibility": {}}))
     assert [g["label"] for g in subjects["groups"]] == ["Rhinos"]
+
+
+@pytest.mark.asyncio
+async def test_auth_says_who_the_token_signs_in_as(source):
+    source.me = {"username": "gundi_svc", "first_name": "Gundi", "last_name": "Service", "is_active": True}
+    result = await handlers.action_auth(INTEGRATION, AuthenticateConfig(token="t"))
+    assert result["connected_as"] == "Gundi Service (gundi_svc)"
+
+
+def test_the_auth_form_has_no_site_url_the_connections_own_is_used():
+    from app.ersharing.clients import source_url_of
+    assert "base_url" not in AuthenticateConfig.schema()["properties"]
+    assert source_url_of(INTEGRATION, AuthenticateConfig(token="t")) == "https://sitea.pamdas.org"
+
+
+@pytest.mark.asyncio
+async def test_show_permissions_lists_user_categories_and_subject_groups(source):
+    from app.actions.configurations import ShowPermissionsConfig
+    source.me = {"username": "svc", "first_name": "Svc", "is_superuser": False, "is_active": True,
+                 "permissions": {"event": ["view"], "security": ["read", "create"], "observation": ["view"]}}
+    source.event_types_v1 = {"old": {"value": "old", "display": "Old", "is_active": True,
+                                     "category": {"value": "security", "display": "Security", "is_active": True}}}
+    source.event_types = {"new": {"value": "new", "display": "New", "category": "monitoring"}}
+    source.categories = {"monitoring": {"value": "monitoring", "display": "Monitoring"}}
+    source.subject_groups = [{"id": "g1", "name": "Rhinos", "subjects": [{"name": "Fatu"}],
+                              "subgroups": [{"id": "g2", "name": "Calves", "subjects": [{"name": "Kito"}], "subgroups": []}]}]
+    card = await handlers.action_show_permissions(INTEGRATION, ShowPermissionsConfig())
+    data = card["data"]
+    assert card["ui"] == {"widget": "DynamicJSONCard"}
+    assert data["User Details"] == {"Full Name": "Svc", "Username": "svc", "Is Superuser": False}
+    assert data["Global Permissions"] == {"Event": ["view"], "Observation": ["view"]}
+    assert data["Event Categories"] == {"Security": {"Event Types": ["Old"], "Permissions": ["create", "read"]},
+                                        "Monitoring": {"Event Types": ["New"], "Permissions": ["view"]}}
+    assert data["Subject Groups"] == {"Rhinos": ["Fatu", "Kito"], "Calves": ["Kito"]}
+    assert data["Subject Group UUIDs"] == ["g1", "g2"]
+
+
+@pytest.mark.asyncio
+async def test_show_permissions_reports_rejected_credentials_in_the_card(source):
+    from app.actions.configurations import ShowPermissionsConfig
+    source.failures["get_me"] = IntegrationAuthError("Source site sitea.pamdas.org: EarthRanger rejected the credentials",
+                                                     status_code=401)
+    card = await handlers.action_show_permissions(INTEGRATION, ShowPermissionsConfig())
+    assert card["data"]["User Details"] == {"error": "Source site sitea.pamdas.org: EarthRanger rejected the credentials"}

@@ -8,6 +8,7 @@ from app.services.utils import GlobalUISchemaOptions
 from .core import (
     AuthActionConfiguration,
     ExecutableActionMixin,
+    GenericActionConfiguration,
     PullActionConfiguration,
     ReferenceActionConfiguration,
 )
@@ -26,12 +27,9 @@ AUTH_TYPE_DISPLAY_NAMES = {
 
 # Credentials for one EarthRanger site. Field names match the earth_ranger
 # integration type's auth config, so this model parses both the source
-# credentials and each destination's stored ones. Destinations store no
-# base_url, so it is optional here and required only in the published form.
+# credentials and each destination's stored ones. The site itself is the
+# connection's own URL, as for the earth_ranger type.
 class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
-    base_url: Optional[str] = Field(
-        None, title="EarthRanger site URL", description="For example https://mysite.pamdas.org.",
-    )
     authentication_type: ERAuthenticationType = Field(
         ERAuthenticationType.TOKEN, title="Authentication type",
         description="Sign in with a token, or with a username and password.",
@@ -41,7 +39,7 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
     password: Optional[SecretStr] = Field(None, title="Password", format="password")
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
-        order=["base_url", "authentication_type", "token", "username", "password"],
+        order=["authentication_type", "token", "username", "password"],
     )
 
     class Config:
@@ -51,7 +49,6 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
             # auth types, and token OR username & password, each required.
             properties = schema["properties"]
             credentials = {name: properties.pop(name) for name in ("token", "username", "password")}
-            schema["required"] = ["base_url"]
             auth_type = properties["authentication_type"]
             auth_type.pop("allOf", None)
             auth_type.pop("$ref", None)
@@ -66,6 +63,14 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
                     "properties": {"username": credentials["username"], "password": credentials["password"]},
                 },
             })
+
+class ShowPermissionsConfig(GenericActionConfiguration, ExecutableActionMixin):
+    include_subjects_from_subgroups_in_parent: bool = Field(
+        True,
+        title="Include Subjects from Subgroups in Parent Group",
+        description="When showing subjects from a group, include subjects from its subgroups as well.",
+    )
+
 
 def reference(action: str) -> dict:
     """gundi:reference annotation: the portal fills each list item from this

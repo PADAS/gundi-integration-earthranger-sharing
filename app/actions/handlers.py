@@ -11,7 +11,7 @@ from app.services.action_scheduler import crontab_schedule
 from app.services.activity_logger import activity_logger
 from .configurations import (
     AuthenticateConfig, ERAuthenticationType, ListEventTypesQuery, ListFeatureGroupsQuery, ListSubjectGroupsQuery,
-    PreviewEventsShareQuery, PreviewSubjectsShareQuery, SyncEventsConfig, SyncObservationsConfig,
+    PreviewEventsShareQuery, PreviewSubjectsShareQuery, ShowPermissionsConfig, SyncEventsConfig, SyncObservationsConfig,
 )
 from .core import ReferenceDataResponse, ReferenceOption, action_title
 
@@ -42,6 +42,8 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
     if action_config.authentication_type == ERAuthenticationType.USERNAME_PASSWORD and not (
             action_config.username and action_config.password):
         return {"valid_credentials": False, "error": "Please provide both a username and a password."}
+    from app.ersharing.permissions import connected_as
+
     source_url = clients.source_url_of(integration, action_config)
     if not source_url:
         return {"valid_credentials": False, "error": "Please provide the EarthRanger site URL."}
@@ -58,11 +60,58 @@ async def action_auth(integration: Integration, action_config: AuthenticateConfi
     except IntegrationError as e:
         return {"valid_credentials": False, "error": e.message}
     result = {"valid_credentials": True, "capabilities": capabilities}
+    if who := connected_as(me):
+        result["connected_as"] = who
     missing = [name for name, ok in capabilities.items() if not ok]
     if missing:
         result["warning"] = (f"This token can't read: {', '.join(missing)}. "
                              "Sharing those will fail until the token's permissions are updated.")
     return result
+
+
+@action_title("Show Permissions")
+async def action_show_permissions(integration: Integration, action_config: ShowPermissionsConfig):
+    """What the source token can do at the site: the same card as the EarthRanger connector's."""
+    from app.ersharing import clients, permissions
+    from app.services.errors import IntegrationError
+
+    data = {"User Details": {}, "Global Permissions": {}, "Event Categories": {}, "Subject Groups": {}}
+    response = {"ui": {"widget": "DynamicJSONCard"}, "data": data}
+    try:
+        site_cm = await _source_site(integration)
+    except IntegrationError as e:
+        data["User Details"]["error"] = e.message
+        return response
+    async with site_cm as site:
+        try:
+            me = await site.get_me()
+        except IntegrationError as e:
+            data["User Details"]["error"] = e.message
+            return response
+        data["User Details"] = permissions.user_details(me)
+        granted = me.get("permissions") or {}
+        data["Global Permissions"] = permissions.global_permissions(granted)
+        try:
+            v1_types = [t for t in await site.list_event_types_v1() if t.get("is_active", True)]
+            v2_types = await site.list_event_types_v2(include_schema=False)
+            categories = await site.get_event_categories()
+        except IntegrationError as e:
+            data["Event Categories"]["error"] = e.message
+        else:
+            event_types = permissions.as_v1_shape(v1_types, v2_types, categories)
+            data["Event Categories"] = permissions.categories_with_types(
+                permissions.category_permissions(granted), event_types)
+            data["Event Type Slugs"] = sorted({t["value"] for t in event_types if t.get("value")})
+            data["Event Category Slugs"] = sorted({t["category"]["value"] for t in event_types
+                                                   if isinstance(t.get("category"), dict) and t["category"].get("value")})
+        try:
+            groups = await site.get_subject_groups(flat=not action_config.include_subjects_from_subgroups_in_parent)
+        except IntegrationError as e:
+            data["Subject Groups"]["error"] = e.message
+        else:
+            data["Subject Groups"] = permissions.subject_groups(groups)
+            data["Subject Group UUIDs"] = permissions.group_ids(groups)
+    return response
 
 
 async def _source_site(integration):
