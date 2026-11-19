@@ -19,7 +19,7 @@ from .geo import load_area
 from .modes import observation_settings
 from .naming import site_host
 from .observations import (
-    add_lineage, advance, build_payload, has_valid_location, in_assignment, is_new, parse_assignments,
+    add_lineage, advance, build_payload, has_valid_location, in_assignment, is_new, note_read, parse_assignments,
     passed_through, point_batches, read_start, OVERLAP, SHORT_OVERLAP,
 )
 from .reporting import DestinationReport, is_stalled, log_skipped_destinations, publish_report
@@ -217,7 +217,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
          and (area is None or area.contains_point(o["location"]["longitude"], o["location"]["latitude"]))),
         key=lambda o: parse_dt(o["recorded_at"]),
     )
-    to_send = {d_id: [o for o in candidates if is_new(o, markers[d_id]) and not passed_through(o, site_host(dest.url))]
+    to_send = {d_id: [o for o in candidates if is_new(o, markers[d_id], full_reread) and not passed_through(o, site_host(dest.url))]
                for d_id, dest in sites.items()}
     details_key = {d_id: f"{d_id}:details-check:{subject_id}" for d_id in sites}
     details_due = {d_id: share.subject_additional and markers[d_id] is not None
@@ -256,7 +256,7 @@ async def _share_subject(source, sites, reports, freshest, state, share, area, a
             await state.set_marker(OBSERVATIONS_ACTION, key, marker)
         if complete and observations:
             # Points that will never be shared (filtered out) still move the marker, so they aren't re-read.
-            moved = advance(marker, observations, now)
+            moved = note_read(advance(marker, observations, now), now, start, full_reread)
             if moved != marker:
                 marker = moved
                 await state.set_marker(OBSERVATIONS_ACTION, key, marker)

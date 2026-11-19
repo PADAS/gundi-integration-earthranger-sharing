@@ -12,6 +12,8 @@ MAX_BATCH = 200
 # (recorded earlier, uploaded later) are still found; is_new() drops repeats.
 OVERLAP = timedelta(hours=12)  # how far before its marker a subject is re-read, once an hour
 SHORT_OVERLAP = timedelta(minutes=5)  # how far before its marker it is read in the runs in between
+CLOCK_SKEW = timedelta(minutes=2)  # leeway between the site's created_at and the runner's clock
+MAX_SHORT_READS = 24  # short reads remembered between full re-reads; older ones are dropped
 
 
 def has_valid_location(obs: dict) -> bool:
@@ -55,13 +57,31 @@ def in_assignment(obs: dict, assignments: List[Assignment]) -> bool:
                for a in assignments)
 
 
-def is_new(obs: dict, marker: Optional[Marker]) -> bool:
+def is_new(obs: dict, marker: Optional[Marker], full_reread: bool = False) -> bool:
     if marker is None or parse_dt(obs["recorded_at"]) > marker.since:
         return True
     created = obs.get("created_at")
     if created is None or marker.created_since is None:
         return True  # can't tell; ER's sharing endpoint drops duplicates
-    return parse_dt(created) > marker.created_since
+    created = parse_dt(created)
+    if created > marker.created_since:
+        return True
+    return full_reread and missed_by_short_read(parse_dt(obs["recorded_at"]), created, marker)
+
+
+def missed_by_short_read(recorded: datetime, created: datetime, marker: Marker) -> bool:
+    """True when the first short read after the point was posted started after the point's
+    recorded time, so it never saw the point, though it moved created_since past it."""
+    for run_at, read_from in marker.short_reads:
+        if run_at > created + CLOCK_SKEW:
+            return recorded < read_from
+    return False
+
+
+def note_read(marker: Marker, now: datetime, read_from: datetime, full_reread: bool) -> Marker:
+    """Remember a short read's start until the next full re-read, which checks it."""
+    short_reads = [] if full_reread else (marker.short_reads + [[now, read_from]])[-MAX_SHORT_READS:]
+    return marker.copy(update={"short_reads": short_reads})
 
 
 def read_start(markers: List[Optional[Marker]], fallback: datetime, overlap: timedelta = OVERLAP) -> datetime:
@@ -83,7 +103,8 @@ def advance(marker: Optional[Marker], batch: List[dict], now: datetime, keep_cre
     created_since = max(created) if created else None
     moved = marker is None or recorded != marker.since or created_since != marker.created_since
     return Marker(since=recorded, created_since=created_since,
-                  advanced_at=now if moved else marker.advanced_at)
+                  advanced_at=now if moved else marker.advanced_at,
+                  short_reads=marker.short_reads if marker is not None else [])
 
 
 def build_payload(subject: dict, obs: dict, s: ObservationSettings, source_additional: Dict[str, dict]) -> dict:

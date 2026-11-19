@@ -19,6 +19,8 @@ class Marker(BaseModel):
     since: datetime                          # resume reading here
     advanced_at: datetime                    # when `since` last moved (stall detection)
     created_since: Optional[datetime] = None  # observations: high-water mark of created_at
+    # observations: (run time, read start) of each short read since the last full re-read
+    short_reads: List[List[datetime]] = Field(default_factory=list)
 
 
 class NoteRecord(BaseModel):
