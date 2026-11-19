@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 from gundi_core.events import LogLevel
 
 from app.services.errors import IntegrationError
-from .clients import halts_site
+from .clients import halts_site, refused_by_destination
 from .events import incident_ids
 from .reporting import DestinationReport
 from .state import EventRecord, NoteRecord
@@ -172,7 +172,7 @@ async def apply_incidents(dest, dest_event_id: str, wanted_ids: List[str], recor
             await dest.add_to_incident(dest_event_id, incident_id)
             record.incidents.append(incident_id)
         except IntegrationError as e:
-            if halts_site(e):
+            if halts_site(e) and not refused_by_destination(e):
                 raise
             report.error("Couldn't link a copied event to its incident (the incident may not be shared)",
                          item=incident_id, level=LogLevel.WARNING)
@@ -180,9 +180,13 @@ async def apply_incidents(dest, dest_event_id: str, wanted_ids: List[str], recor
         try:
             await dest.remove_from_incident(dest_event_id, incident_id)
         except IntegrationError as e:
-            if halts_site(e):
+            if refused_by_destination(e):
+                # Not tried again every run: the link stays at the destination.
+                report.error("Couldn't unlink a copied event from an incident because the destination "
+                             "doesn't allow it", item=incident_id, level=LogLevel.WARNING)
+            elif halts_site(e):
                 raise
-            if e.status_code != 404:
+            elif e.status_code != 404:
                 report.error("Couldn't unlink a copied event from an incident", item=incident_id,
                              level=LogLevel.WARNING)
                 continue

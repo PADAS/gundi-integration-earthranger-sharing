@@ -12,7 +12,7 @@ from app import settings
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import log_action_activity
 from app.services.errors import IntegrationError
-from .clients import auth_config_of, halts_site, open_site, source_url_of
+from .clients import auth_config_of, halts_site, open_site, refused_by_destination, source_url_of
 from .destinations import Destination, resolve_destinations
 from .event_types import TYPE_NOT_READY, EventTypeSync
 from .events import (
@@ -244,10 +244,11 @@ async def _sync_event(run, destination, dest, types, event, report):
     try:
         await _copy_event(run, destination, dest, types, event, report)
     except IntegrationError as e:
-        if halts_site(e) and not await _set_aside_after_repeated_halts(run, destination, event_id, e):
+        halts = halts_site(e) and not refused_by_destination(e)
+        if halts and not await _set_aside_after_repeated_halts(run, destination, event_id, e):
             raise
         report.failed += 1
-        report.error(SET_ASIDE if halts_site(e) else REJECTED, item=f"{event_label(event)}: {e.message}")
+        report.error(SET_ASIDE if halts else REJECTED, item=f"{event_label(event)}: {e.message}")
         rejected.setdefault(event_id, utcnow())
         return
     except RedisError:

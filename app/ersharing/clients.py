@@ -115,6 +115,12 @@ def halts_site(error: IntegrationError) -> bool:
     return (error.status_code or 0) >= 500
 
 
+def refused_by_destination(error: IntegrationError) -> bool:
+    """A 403 from the destination on one item: the token may not write that event, category
+    or link. Only that item is skipped; credentials EarthRanger rejects answer 401."""
+    return error.status_code == 403 and getattr(error, "site_role", None) == "destination"
+
+
 def auth_config_of(configurations) -> AuthenticateConfig:
     config = find_config_for_action(configurations or [], "auth")
     if config is None or not config.data:
